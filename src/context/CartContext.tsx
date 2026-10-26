@@ -1,0 +1,311 @@
+'use client'
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react'
+import type { Product } from '@/lib/catalog/types'
+
+export interface CartItem {
+  product: Product
+  size: number
+  quantity: number
+  variantId?: string
+}
+
+interface CartContextValue {
+  items: CartItem[]
+  buyNowItems: CartItem[] | null
+  wishlist: string[]
+  hydrated: boolean
+  addToCart: (
+    product: Product,
+    size: number,
+    quantity?: number,
+    variantId?: string,
+  ) => void
+  startBuyNow: (
+    product: Product,
+    size: number,
+    quantity?: number,
+    variantId?: string,
+  ) => void
+  clearBuyNow: () => void
+  removeFromCart: (productId: string, size: number) => void
+  updateQuantity: (productId: string, size: number, quantity: number) => void
+  toggleWishlist: (productId: string) => void
+  isWishlisted: (productId: string) => boolean
+  cartCount: number
+  cartTotal: number
+  cartWeightKg: number
+  clearCart: () => void
+}
+
+const CartContext = createContext<CartContextValue | null>(null)
+
+const CART_STORAGE_KEY = 'govibe-cart'
+const BUY_NOW_STORAGE_KEY = 'govibe-buy-now'
+const WISHLIST_STORAGE_KEY = 'govibe-wishlist'
+
+type PersistedCartItem = {
+  product: Product
+  size: number
+  quantity: number
+  variantId?: string
+}
+
+function readJson<T>(key: string, fallback: T, storage: Storage): T {
+  try {
+    const raw = storage.getItem(key)
+    if (!raw) return fallback
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+function writeJson(key: string, value: unknown, storage: Storage) {
+  try {
+    storage.setItem(key, JSON.stringify(value))
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function resolveVariantId(
+  product: Product,
+  size: number,
+  variantId?: string,
+) {
+  return (
+    variantId ??
+    product.variants.find((v) => v.sizeEu === size && v.stock > 0)?.id
+  )
+}
+
+export function CartProvider({ children }: { children: ReactNode }) {
+  const [items, setItems] = useState<CartItem[]>([])
+  const [buyNowItems, setBuyNowItems] = useState<CartItem[] | null>(null)
+  const [wishlist, setWishlist] = useState<string[]>([])
+  const [hydrated, setHydrated] = useState(false)
+
+  useEffect(() => {
+    const storedItems = readJson<PersistedCartItem[]>(
+      CART_STORAGE_KEY,
+      [],
+      window.localStorage,
+    )
+    const storedWishlist = readJson<string[]>(
+      WISHLIST_STORAGE_KEY,
+      [],
+      window.localStorage,
+    )
+    const storedBuyNow = readJson<PersistedCartItem[] | null>(
+      BUY_NOW_STORAGE_KEY,
+      null,
+      window.sessionStorage,
+    )
+    if (Array.isArray(storedItems)) setItems(storedItems)
+    if (Array.isArray(storedWishlist)) setWishlist(storedWishlist)
+    if (Array.isArray(storedBuyNow) && storedBuyNow.length > 0) {
+      setBuyNowItems(storedBuyNow)
+    }
+    setHydrated(true)
+  }, [])
+
+  useEffect(() => {
+    if (!hydrated) return
+    writeJson(CART_STORAGE_KEY, items, window.localStorage)
+  }, [items, hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
+    if (buyNowItems && buyNowItems.length > 0) {
+      writeJson(BUY_NOW_STORAGE_KEY, buyNowItems, window.sessionStorage)
+    } else {
+      try {
+        window.sessionStorage.removeItem(BUY_NOW_STORAGE_KEY)
+      } catch {
+        // ignore
+      }
+    }
+  }, [buyNowItems, hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
+    writeJson(WISHLIST_STORAGE_KEY, wishlist, window.localStorage)
+  }, [wishlist, hydrated])
+
+  const addToCart = useCallback(
+    (
+      product: Product,
+      size: number,
+      quantity = 1,
+      variantId?: string,
+    ) => {
+      const resolvedVariantId = resolveVariantId(product, size, variantId)
+
+      setItems((prev) => {
+        const existing = prev.find(
+          (i) =>
+            i.product.id === product.id &&
+            i.size === size &&
+            i.variantId === resolvedVariantId,
+        )
+        if (existing) {
+          return prev.map((i) =>
+            i.product.id === product.id &&
+            i.size === size &&
+            i.variantId === resolvedVariantId
+              ? { ...i, quantity: i.quantity + quantity }
+              : i,
+          )
+        }
+        return [
+          ...prev,
+          { product, size, quantity, variantId: resolvedVariantId },
+        ]
+      })
+    },
+    [],
+  )
+
+  const startBuyNow = useCallback(
+    (
+      product: Product,
+      size: number,
+      quantity = 1,
+      variantId?: string,
+    ) => {
+      const resolvedVariantId = resolveVariantId(product, size, variantId)
+      const next: CartItem[] = [
+        { product, size, quantity, variantId: resolvedVariantId },
+      ]
+      // Persist before navigation so /checkout never races an empty bag.
+      writeJson(BUY_NOW_STORAGE_KEY, next, window.sessionStorage)
+      setBuyNowItems(next)
+    },
+    [],
+  )
+
+  const clearBuyNow = useCallback(() => {
+    try {
+      window.sessionStorage.removeItem(BUY_NOW_STORAGE_KEY)
+    } catch {
+      // ignore
+    }
+    setBuyNowItems(null)
+  }, [])
+
+  const removeFromCart = useCallback((productId: string, size: number) => {
+    setItems((prev) =>
+      prev.filter((i) => !(i.product.id === productId && i.size === size)),
+    )
+  }, [])
+
+  const updateQuantity = useCallback(
+    (productId: string, size: number, quantity: number) => {
+      if (quantity < 1) {
+        removeFromCart(productId, size)
+        return
+      }
+      setItems((prev) =>
+        prev.map((i) =>
+          i.product.id === productId && i.size === size
+            ? { ...i, quantity }
+            : i,
+        ),
+      )
+    },
+    [removeFromCart],
+  )
+
+  const toggleWishlist = useCallback((productId: string) => {
+    setWishlist((prev) =>
+      prev.includes(productId)
+        ? prev.filter((id) => id !== productId)
+        : [...prev, productId],
+    )
+  }, [])
+
+  const isWishlisted = useCallback(
+    (productId: string) => wishlist.includes(productId),
+    [wishlist],
+  )
+
+  const clearCart = useCallback(() => setItems([]), [])
+
+  const cartCount = useMemo(
+    () => items.reduce((sum, i) => sum + i.quantity, 0),
+    [items],
+  )
+
+  const cartTotal = useMemo(
+    () => items.reduce((sum, i) => sum + i.product.price * i.quantity, 0),
+    [items],
+  )
+
+  const cartWeightKg = useMemo(
+    () =>
+      Math.max(
+        0.5,
+        items.reduce(
+          (sum, i) => sum + (i.product.weightKg || 0.5) * i.quantity,
+          0,
+        ),
+      ),
+    [items],
+  )
+
+  const value = useMemo(
+    () => ({
+      items,
+      buyNowItems,
+      wishlist,
+      hydrated,
+      addToCart,
+      startBuyNow,
+      clearBuyNow,
+      removeFromCart,
+      updateQuantity,
+      toggleWishlist,
+      isWishlisted,
+      cartCount,
+      cartTotal,
+      cartWeightKg,
+      clearCart,
+    }),
+    [
+      items,
+      buyNowItems,
+      wishlist,
+      hydrated,
+      addToCart,
+      startBuyNow,
+      clearBuyNow,
+      removeFromCart,
+      updateQuantity,
+      toggleWishlist,
+      isWishlisted,
+      cartCount,
+      cartTotal,
+      cartWeightKg,
+      clearCart,
+    ],
+  )
+
+  return <CartContext.Provider value={value}>{children}</CartContext.Provider>
+}
+
+export function useCart(): CartContextValue {
+  const ctx = useContext(CartContext)
+  if (!ctx) {
+    throw new Error('useCart must be used within CartProvider')
+  }
+  return ctx
+}

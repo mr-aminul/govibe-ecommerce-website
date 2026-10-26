@@ -1,0 +1,33 @@
+/** Max hero slideshow slides. */
+export const MAX_HERO_SLIDES = 6
+
+/** Max products per home grid section (Most popular / Everyday carry). */
+export const HOME_SECTION_PRODUCT_CAP = 8
+
+/** Default autoplay interval for hero slideshow (ms). */
+export const DEFAULT_SLIDE_INTERVAL_MS = 5000
+
+/** Default delay before the marketing popup appears (seconds). */
+export const DEFAULT_MARKETING_POPUP_DELAY_SECONDS = 3
+
+/** Clamp range for marketing popup delay. */
+export const MARKETING_POPUP_DELAY_MIN = 0
+export const MARKETING_POPUP_DELAY_MAX = 60
+
+export const SITE_MEDIA_BUCKET = 'govibe-site-media'
+
+export const SITE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+export const SITE_VIDEO_MAX_BYTES = 24 * 1024 * 1024
+
+export const SITE_ALLOWED_IMAGE_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+] as const
+
+export const SITE_ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'] as const
+
+export type SitePageKey = 'home' | 'about' | 'site'
+
+export const SITE_PAGE_KEYS: SitePageKey[] = ['home', 'about', 'site']

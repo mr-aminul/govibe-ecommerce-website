@@ -1,0 +1,185 @@
+import { colorwayKey } from '@/lib/catalog/colorway'
+import { normalizeColorHex } from '@/lib/catalog/gallery'
+import type { Product, ProductImage, ProductVariantView } from '@/lib/catalog/types'
+
+export type ProductColorwayOption = {
+  key: string
+  name: string | null
+  /** Lead image for this colorway (card + swatch thumb). */
+  imageUrl: string | null
+  /** Solid swatch when no thumb is available. */
+  colorHex: string | null
+}
+
+/** One PLP tile — a product featured as a specific colorway. */
+export type ProductColorwayListing = {
+  product: Product
+  colorwayKey: string
+  listingKey: string
+}
+
+/**
+ * Storefront path for a product, optionally deep-linking a colorway.
+ * Admin still edits one product; each color can have its own listing URL.
+ * Uses + for spaces so soft-nav query strings stay stable across browsers.
+ */
+export function productPath(
+  slug: string,
+  colorKey?: string | null,
+): string {
+  const base = `/product/${slug}`
+  if (!colorKey) return base
+  const color = encodeURIComponent(colorKey).replace(/%20/g, '+')
+  return `${base}?color=${color}`
+}
+
+/**
+ * Expand catalog products into one listing per colorway (Birkenstock-style PLP).
+ * Products with no colorways still emit a single default tile.
+ */
+export function expandProductsByColorway(
+  products: readonly Product[],
+  limit?: number,
+): ProductColorwayListing[] {
+  const listings: ProductColorwayListing[] = []
+
+  for (const product of products) {
+    const colorways = productColorways(product)
+    const keys =
+      colorways.length > 0 ? colorways.map((c) => c.key) : ['default']
+
+    for (const key of keys) {
+      listings.push({
+        product,
+        colorwayKey: key,
+        listingKey: `${product.id}:${key}`,
+      })
+      if (limit != null && listings.length >= limit) return listings
+    }
+  }
+
+  return listings
+}
+
+type ColorwayAccum = {
+  name: string | null
+  imageUrl: string | null
+  colorHex: string | null
+}
+
+function firstGalleryForColor(
+  images: ProductImage[],
+  key: string,
+): ProductImage | undefined {
+  return images.find(
+    (img) => Boolean(img.color?.trim()) && colorwayKey(img.color) === key,
+  )
+}
+
+/**
+ * Unique colorways for a product — used by listing cards and the PDP picker.
+ */
+export function productColorways(
+  product: Pick<Product, 'variants' | 'images' | 'colors'>,
+): ProductColorwayOption[] {
+  const unique = new Map<string, ColorwayAccum>()
+
+  const upsert = (
+    key: string,
+    next: Partial<ColorwayAccum> & { name?: string | null },
+  ) => {
+    const existing = unique.get(key)
+    const nextHex = normalizeColorHex(next.colorHex)
+    if (!existing) {
+      unique.set(key, {
+        name: next.name?.trim() || null,
+        imageUrl: next.imageUrl ?? null,
+        colorHex: nextHex,
+      })
+      return
+    }
+    if (!existing.name && next.name?.trim()) {
+      existing.name = next.name.trim()
+    }
+    if (!existing.imageUrl && next.imageUrl) {
+      existing.imageUrl = next.imageUrl
+    }
+    // Gallery-derived hex should win over variant name defaults.
+    if (nextHex && (!existing.colorHex || next.imageUrl)) {
+      existing.colorHex = nextHex
+    }
+  }
+
+  for (const variant of product.variants) {
+    const key = colorwayKey(variant.color)
+    const fromGallery = firstGalleryForColor(product.images, key)
+    upsert(key, {
+      name: variant.color,
+      imageUrl: fromGallery?.url ?? variant.imageUrl,
+      colorHex: fromGallery?.colorHex ?? variant.colorHex,
+    })
+  }
+
+  for (const image of product.images) {
+    if (!image.color?.trim()) continue
+    const key = colorwayKey(image.color)
+    upsert(key, {
+      name: image.color,
+      imageUrl: image.url,
+      colorHex: image.colorHex,
+    })
+  }
+
+  if (unique.size === 0 && product.colors.length > 0) {
+    for (const color of product.colors) {
+      upsert(colorwayKey(color), { name: color })
+    }
+  }
+
+  return [...unique.entries()].map(([key, value]) => ({
+    key,
+    name: value.name,
+    imageUrl: value.imageUrl,
+    colorHex: value.colorHex,
+  }))
+}
+
+/**
+ * Thumbnail for a cart/checkout line — selected colorway photo, not the
+ * product’s default (first gallery) image.
+ */
+export function imageForCartLine(
+  product: Pick<Product, 'image' | 'images' | 'variants'>,
+  variantId?: string,
+): string {
+  const variant = product.variants.find((v) => v.id === variantId)
+  if (!variant) return product.image
+
+  const fromGallery = firstGalleryForColor(
+    product.images,
+    colorwayKey(variant.color),
+  )
+  return fromGallery?.url ?? variant.imageUrl ?? product.image
+}
+
+/** First in-stock (or any) variant matching a colorway key. */
+export function variantForColorway(
+  variants: ProductVariantView[],
+  colorKey: string,
+  preferredSizeEu?: number | null,
+): ProductVariantView | undefined {
+  const matches = variants.filter((v) => colorwayKey(v.color) === colorKey)
+  if (matches.length === 0) return undefined
+
+  if (preferredSizeEu != null) {
+    const sized =
+      matches.find((v) => v.sizeEu === preferredSizeEu && v.stock > 0) ??
+      matches.find((v) => v.sizeEu === preferredSizeEu)
+    if (sized) return sized
+  }
+
+  return (
+    matches.find((v) => v.stock > 0) ??
+    matches[0]
+  )
+}

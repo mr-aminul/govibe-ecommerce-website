@@ -1,0 +1,1234 @@
+'use server'
+
+import { revalidatePath, revalidateTag } from 'next/cache'
+import { requireRole } from '@/lib/auth/session'
+import { adminProductPath } from '@/lib/admin/paths'
+import { revalidateStorefront } from '@/lib/catalog/cache-tags'
+import { normalizeProductBadge } from '@/lib/catalog/badge'
+import {
+  PRODUCT_IMAGE_BUCKET,
+  PRODUCT_VIDEO_BUCKET,
+  RELATED_PRODUCTS_DISPLAY_CAP,
+} from '@/lib/catalog/constants'
+import { normalizeColorHex } from '@/lib/catalog/gallery'
+import { ONE_SIZE_EU } from '@/lib/catalog/sizing'
+import { isValidSlug, slugify } from '@/lib/catalog/slug'
+import type { ActionResult, RelatedProductOption } from '@/lib/catalog/types'
+import {
+  deleteObjects,
+  isObjectStoreConfigured,
+} from '@/lib/media/object-store'
+import { mediaObjectPathsIncludingVariants } from '@/lib/media/variants'
+import { createClient } from '@/lib/db/server'
+
+const BULK_PRODUCT_ACTION_LIMIT = 50
+
+type BulkProductFailure = {
+  productId: string
+  productName: string | null
+  error: string
+}
+
+export type BulkProductActionResult = {
+  okCount: number
+  failCount: number
+  failures: BulkProductFailure[]
+}
+
+function readString(formData: FormData, key: string): string {
+  return String(formData.get(key) ?? '').trim()
+}
+
+function readNumber(formData: FormData, key: string): number | null {
+  const raw = readString(formData, key)
+  if (!raw) return null
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : null
+}
+
+function revalidateProductSurfaces(...slugs: Array<string | null | undefined>) {
+  revalidatePath('/admin/catalog')
+  revalidatePath('/admin/catalog/products')
+  revalidatePath('/admin/inventory')
+  for (const slug of slugs) {
+    if (slug) revalidatePath(adminProductPath(slug))
+  }
+  revalidateStorefront(...slugs)
+  revalidateTag('admin-products')
+}
+
+type VariantInput = {
+  id?: string
+  size_eu: number
+  color?: string | null
+  color_hex?: string | null
+  media_id?: string | null
+  sku?: string | null
+  stock: number
+  active: boolean
+}
+
+function parseVariantsJson(raw: string): VariantInput[] | { error: string } {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return { error: 'Variants payload must be an array.' }
+
+    const variants: VariantInput[] = []
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue
+      const row = item as Record<string, unknown>
+      const size = Number(row.size_eu)
+      const stock = Number(row.stock ?? 0)
+      // size_eu 0 is the one-size sentinel (bags / accessories).
+      if (!Number.isFinite(size) || size < 0) {
+        return { error: 'Each variant needs a valid EU size.' }
+      }
+      if (!Number.isFinite(stock) || stock < 0) {
+        return { error: 'Stock must be zero or greater.' }
+      }
+      const colorRaw = typeof row.color === 'string' ? row.color.trim() : ''
+      variants.push({
+        id: typeof row.id === 'string' ? row.id : undefined,
+        size_eu: size,
+        color: colorRaw || null,
+        color_hex:
+          typeof row.color_hex === 'string'
+            ? normalizeColorHex(row.color_hex)
+            : null,
+        media_id:
+          typeof row.media_id === 'string' && row.media_id.length > 0
+            ? row.media_id
+            : null,
+        sku: typeof row.sku === 'string' ? row.sku : null,
+        stock,
+        active: row.active !== false,
+      })
+    }
+
+    const active = variants.filter((v) => v.active)
+    for (const variant of active) {
+      if (!variant.color?.trim()) {
+        return {
+          error: 'Every active variant needs a color name (e.g. Navy, Black).',
+        }
+      }
+    }
+
+    const byColor = new Map<string, VariantInput[]>()
+    for (const variant of active) {
+      const key = variant.color!.trim().toLowerCase()
+      const list = byColor.get(key) ?? []
+      list.push(variant)
+      byColor.set(key, list)
+    }
+
+    for (const [, group] of byColor) {
+      // Normalize: one swatch image per colorway across all sizes.
+      const primaryMedia =
+        group.find((v) => v.media_id)?.media_id ?? null
+      for (const variant of group) {
+        variant.media_id = primaryMedia
+      }
+      const sizes = group.map((v) => v.size_eu)
+      if (new Set(sizes).size !== sizes.length) {
+        return {
+          error: `Duplicate size under color “${group[0].color}”.`,
+        }
+      }
+    }
+
+    return variants
+  } catch {
+    return { error: 'Could not parse variants.' }
+  }
+}
+
+/**
+ * Why this product cannot go live — missing sellable variants or color names.
+ * Used by publish / update paths so incomplete listings stay draft.
+ */
+async function getPublishBlockReason(
+  productId: string,
+): Promise<string | null> {
+  const db = await createClient()
+  const { data: variants, error } = await db
+    .from('product_variants')
+    .select('id, color, active')
+    .eq('product_id', productId)
+    .eq('active', true)
+
+  if (error) return error.message
+
+  const active = variants ?? []
+  if (active.length < 1) {
+    return 'Add at least one active size/color variant before publishing.'
+  }
+  for (const variant of active) {
+    if (!variant.color?.trim()) {
+      return 'Every active variant needs a color name (e.g. Navy, Black) before publishing.'
+    }
+  }
+  return null
+}
+
+/** One sheet row = one product. Variants expand from sizes × colors lists. */
+export type BulkProductRowInput = {
+  key: string
+  name: string
+  slug: string
+  description: string
+  price: number | null
+  compare_at: number | null
+  weight_kg: number | null
+  category_id: string | null
+  badge: string
+  featured: boolean
+  /** Comma/space separated EU sizes, e.g. "40, 41, 42". */
+  sizes: string
+  /** Comma separated colors, e.g. "Black, White" or "Black:#111111". */
+  colors: string
+  /** Starting stock applied to every generated variant. */
+  stock: number | null
+}
+
+export type BulkProductRowResult = {
+  key: string
+  ok: boolean
+  id?: string
+  slug?: string
+  error?: string
+  /** How many variants were created for this product. */
+  variantCount?: number
+}
+
+const MAX_VARIANTS_PER_PRODUCT = 80
+
+const NAMED_COLOR_HEX: Record<string, string> = {
+  black: '#111111',
+  white: '#F5F5F5',
+  ivory: '#FFFFF0',
+  cream: '#FFFDD0',
+  navy: '#1A3668',
+  blue: '#2563EB',
+  red: '#DC2626',
+  green: '#16A34A',
+  brown: '#8B5E3C',
+  tan: '#D2B48C',
+  beige: '#E8DCC8',
+  grey: '#6B7280',
+  gray: '#6B7280',
+  charcoal: '#374151',
+  pink: '#DB2777',
+  purple: '#7C3AED',
+  yellow: '#EAB308',
+  orange: '#EA580C',
+  olive: '#6B8E23',
+  maroon: '#7F1D1D',
+  gold: '#C9A227',
+  silver: '#C0C0C0',
+}
+
+function splitList(raw: string): string[] {
+  return raw
+    .split(/[,|/;]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+function parseSizesList(raw: string): number[] | { error: string } {
+  const parts = splitList(raw)
+  if (parts.length === 0) return [40]
+
+  const sizes: number[] = []
+  for (const part of parts) {
+    const value = Number(part)
+    if (!Number.isFinite(value) || value <= 0) {
+      return { error: `Invalid size "${part}". Use numbers like 40, 41, 42.` }
+    }
+    if (!sizes.includes(value)) sizes.push(value)
+  }
+  return sizes.sort((a, b) => a - b)
+}
+
+function parseColorToken(raw: string): { color: string; color_hex: string } {
+  const match = raw.match(/^(.+?)[#:=]\s*(#?[0-9a-fA-F]{6})$/)
+  if (match) {
+    const color = match[1]!.trim()
+    const hex = normalizeColorHex(match[2]) ?? '#1A3668'
+    return { color, color_hex: hex }
+  }
+
+  const color = raw.trim()
+  const named = NAMED_COLOR_HEX[color.toLowerCase()]
+  return { color, color_hex: named ?? '#1A3668' }
+}
+
+function parseColorsList(
+  raw: string,
+): Array<{ color: string; color_hex: string }> | { error: string } {
+  const parts = splitList(raw)
+  if (parts.length === 0) {
+    return {
+      error: 'Add at least one color name (e.g. Black, Grey).',
+    }
+  }
+
+  const colors: Array<{ color: string; color_hex: string }> = []
+  const seen = new Set<string>()
+  for (const part of parts) {
+    const parsed = parseColorToken(part)
+    if (!parsed.color.trim()) {
+      return { error: 'Every color needs a name (e.g. Grey, Black).' }
+    }
+    const key = `${parsed.color.toLowerCase()}|${parsed.color_hex}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    colors.push(parsed)
+  }
+  return colors
+}
+
+function expandVariants(input: {
+  sizes: string
+  colors: string
+  stock: number | null
+}):
+  | {
+      variants: Array<{
+        size_eu: number
+        color: string
+        color_hex: string
+        stock: number
+        sku: string | null
+      }>
+    }
+  | { error: string } {
+  const sizes = parseSizesList(input.sizes)
+  if ('error' in sizes) return sizes
+  const colors = parseColorsList(input.colors)
+  if ('error' in colors) return colors
+
+  const stock = input.stock ?? 0
+  if (!Number.isFinite(stock) || stock < 0) {
+    return { error: 'Stock must be zero or greater.' }
+  }
+
+  const total = sizes.length * colors.length
+  if (total > MAX_VARIANTS_PER_PRODUCT) {
+    return {
+      error: `That makes ${total} variants (max ${MAX_VARIANTS_PER_PRODUCT}). Use fewer sizes or colors.`,
+    }
+  }
+
+  const variants = []
+  for (const size of sizes) {
+    for (const color of colors) {
+      variants.push({
+        size_eu: size,
+        color: color.color,
+        color_hex: color.color_hex,
+        stock,
+        sku: null,
+      })
+    }
+  }
+  return { variants }
+}
+
+/**
+ * Create many products from a sheet.
+ * One row = one product. Sizes × colors expand into variants automatically.
+ */
+export async function bulkCreateProducts(
+  rows: BulkProductRowInput[],
+): Promise<ActionResult<{ created: number; results: BulkProductRowResult[] }>> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { ok: false, error: 'Add at least one product row.' }
+  }
+  if (rows.length > 500) {
+    return { ok: false, error: 'Bulk create is limited to 500 rows at a time.' }
+  }
+
+  const results: BulkProductRowResult[] = []
+  const seenSlugs = new Set<string>()
+  const createdSlugs: string[] = []
+  let created = 0
+
+  for (const row of rows) {
+    const name = row.name?.trim() ?? ''
+    if (!name) {
+      results.push({ key: row.key, ok: false, error: 'Name is required.' })
+      continue
+    }
+
+    const slug = (row.slug?.trim() || slugify(name)).toLowerCase()
+    const price = row.price
+    const compareAt = row.compare_at
+    const weightKg = row.weight_kg ?? 0.5
+
+    if (!isValidSlug(slug)) {
+      results.push({
+        key: row.key,
+        ok: false,
+        error: 'Slug must be lowercase letters, numbers, and hyphens.',
+      })
+      continue
+    }
+    if (seenSlugs.has(slug)) {
+      results.push({
+        key: row.key,
+        ok: false,
+        error: 'Duplicate slug in this sheet.',
+      })
+      continue
+    }
+    if (price == null || !Number.isFinite(price) || price < 0) {
+      results.push({
+        key: row.key,
+        ok: false,
+        error: 'Price must be zero or greater.',
+      })
+      continue
+    }
+    if (compareAt != null && (!Number.isFinite(compareAt) || compareAt < 0)) {
+      results.push({
+        key: row.key,
+        ok: false,
+        error: 'Compare-at must be zero or greater.',
+      })
+      continue
+    }
+    if (!Number.isFinite(weightKg) || weightKg <= 0) {
+      results.push({
+        key: row.key,
+        ok: false,
+        error: 'Weight must be greater than zero.',
+      })
+      continue
+    }
+
+    const expanded = expandVariants({
+      sizes: row.sizes ?? '',
+      colors: row.colors ?? '',
+      stock: row.stock,
+    })
+    if ('error' in expanded) {
+      results.push({ key: row.key, ok: false, error: expanded.error })
+      continue
+    }
+
+    seenSlugs.add(slug)
+
+    const { data: product, error: productError } = await db
+      .from('products')
+      .insert({
+        name,
+        slug,
+        description: row.description?.trim() ?? '',
+        price,
+        compare_at: compareAt,
+        weight_kg: weightKg,
+        category_id: row.category_id?.trim() || null,
+        badge: normalizeProductBadge(row.badge),
+        featured: Boolean(row.featured),
+        active: true,
+      })
+      .select('id')
+      .single()
+
+    if (productError || !product) {
+      seenSlugs.delete(slug)
+      results.push({
+        key: row.key,
+        ok: false,
+        error:
+          productError?.code === '23505'
+            ? 'That slug is already in use.'
+            : (productError?.message ?? 'Could not create product.'),
+      })
+      continue
+    }
+
+    const { error: variantError } = await db
+      .from('product_variants')
+      .insert(
+        expanded.variants.map((variant) => ({
+          product_id: product.id,
+          size_eu: variant.size_eu,
+          color: variant.color,
+          color_hex: variant.color_hex,
+          sku: variant.sku,
+          stock: variant.stock,
+          active: true,
+        })),
+      )
+
+    if (variantError) {
+      await db.from('products').delete().eq('id', product.id)
+      seenSlugs.delete(slug)
+      results.push({
+        key: row.key,
+        ok: false,
+        error:
+          variantError.code === '23505'
+            ? 'Duplicate size/color combination.'
+            : variantError.message,
+      })
+      continue
+    }
+
+    created += 1
+    createdSlugs.push(slug)
+    results.push({
+      key: row.key,
+      ok: true,
+      id: product.id,
+      slug,
+      variantCount: expanded.variants.length,
+    })
+  }
+
+  if (created > 0) {
+    revalidateProductSurfaces(...createdSlugs)
+  }
+
+  return { ok: true, data: { created, results } }
+}
+
+function uniqueDraftSlug(): string {
+  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 10)
+  return `untitled-${suffix}`
+}
+
+/**
+ * Bootstrap a blank draft and send the admin straight to the visual editor.
+ * Name/slug stay unique placeholders until they fill the PDP fields.
+ * Call only from a Client Component / form — never during RSC render.
+ */
+export async function createDraftProduct(): Promise<
+  ActionResult<{ id: string; slug: string }>
+> {
+  await requireRole(['admin', 'manager'])
+
+  try {
+    const db = await createClient()
+    let lastError = 'Could not create a draft product. Try again.'
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const slug = uniqueDraftSlug()
+      const { data, error } = await db
+        .from('products')
+        .insert({
+          name: 'Untitled product',
+          slug,
+          description: '',
+          subtitle: null,
+          note: null,
+          materials: '',
+          care_info: '',
+          price: 0,
+          compare_at: null,
+          weight_kg: 0.5,
+          category_id: null,
+          badge: 'New',
+          seo_title: null,
+          seo_description: null,
+          featured: false,
+          active: false,
+        })
+        .select('id, slug')
+        .maybeSingle()
+
+      if (error) {
+        lastError =
+          error.code === '23505'
+            ? 'Could not allocate a unique slug. Try again.'
+            : error.message
+        if (error.code === '23505') continue
+        return { ok: false, error: lastError }
+      }
+
+      if (!data?.id || !data.slug) {
+        return {
+          ok: false,
+          error: 'Could not create a draft product. Try again.',
+        }
+      }
+
+      try {
+        revalidateProductSurfaces(data.slug)
+      } catch {
+        // Product exists; cache will catch up. Don't fail the create.
+      }
+
+      return { ok: true, data: { id: data.id, slug: data.slug } }
+    }
+
+    return { ok: false, error: lastError }
+  } catch (caught) {
+    return {
+      ok: false,
+      error:
+        caught instanceof Error
+          ? caught.message
+          : 'Could not create a draft product. Try again.',
+    }
+  }
+}
+
+/**
+ * Update core product fields. Activating requires ≥1 active variant.
+ */
+export async function updateProduct(
+  productId: string,
+  formData: FormData,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const name = readString(formData, 'name')
+  const slug = readString(formData, 'slug')
+  const description = readString(formData, 'description')
+  const subtitle = readString(formData, 'subtitle') || null
+  const note = readString(formData, 'note') || null
+  const materials = readString(formData, 'materials')
+  const careInfo = readString(formData, 'care_info')
+  const price = readNumber(formData, 'price')
+  const compareAt = readNumber(formData, 'compare_at')
+  const weightKg = readNumber(formData, 'weight_kg') ?? 0.5
+  const categoryId = readString(formData, 'category_id') || null
+  const badge = normalizeProductBadge(readString(formData, 'badge'))
+  const seoTitle = readString(formData, 'seo_title') || null
+  const seoDescription = readString(formData, 'seo_description') || null
+  const featured =
+    formData.get('featured') === 'on' || formData.get('featured') === 'true'
+  const active =
+    formData.get('active') === 'on' || formData.get('active') === 'true'
+  const requiresSizeRaw = formData.get('requires_size')
+  const requiresSize =
+    requiresSizeRaw == null
+      ? true
+      : requiresSizeRaw === 'on' ||
+        requiresSizeRaw === 'true' ||
+        requiresSizeRaw === '1'
+
+  if (!name) return { ok: false, error: 'Name is required.' }
+  if (!isValidSlug(slug)) {
+    return { ok: false, error: 'Slug must be lowercase letters, numbers, and hyphens.' }
+  }
+  if (price == null || price < 0) {
+    return { ok: false, error: 'Price must be zero or greater.' }
+  }
+  if (compareAt != null && compareAt < 0) {
+    return { ok: false, error: 'Compare-at price must be zero or greater.' }
+  }
+  if (weightKg <= 0) {
+    return { ok: false, error: 'Weight must be greater than zero.' }
+  }
+
+  if (active) {
+    const blockReason = await getPublishBlockReason(productId)
+    if (blockReason) return { ok: false, error: blockReason }
+  }
+
+  const { data: existing } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', productId)
+    .maybeSingle()
+
+  const { error } = await db
+    .from('products')
+    .update({
+      name,
+      slug,
+      description,
+      subtitle,
+      note,
+      materials,
+      care_info: careInfo,
+      price,
+      compare_at: compareAt,
+      weight_kg: weightKg,
+      category_id: categoryId,
+      badge,
+      seo_title: seoTitle,
+      seo_description: seoDescription,
+      featured,
+      active,
+      requires_size: requiresSize,
+    })
+    .eq('id', productId)
+
+  if (error) {
+    if (error.code === '23505') {
+      return { ok: false, error: 'That slug is already in use.' }
+    }
+    return { ok: false, error: error.message }
+  }
+
+  revalidateProductSurfaces(slug, existing?.slug)
+  return { ok: true }
+}
+
+/**
+ * Soft-deactivate product (preferred over hard delete).
+ */
+export async function deactivateProduct(
+  productId: string,
+): Promise<ActionResult> {
+  return setProductActive(productId, false)
+}
+
+/**
+ * Publish or unpublish a product. Publishing requires at least one active variant.
+ */
+export async function setProductActive(
+  productId: string,
+  active: boolean,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: existing, error: loadError } = await db
+    .from('products')
+    .select('id, slug, active')
+    .eq('id', productId)
+    .maybeSingle()
+
+  if (loadError || !existing) {
+    return { ok: false, error: loadError?.message ?? 'Product not found.' }
+  }
+
+  if (existing.active === active) return { ok: true }
+
+  if (active) {
+    const blockReason = await getPublishBlockReason(productId)
+    if (blockReason) return { ok: false, error: blockReason }
+  }
+
+  const { error } = await db
+    .from('products')
+    .update({ active })
+    .eq('id', productId)
+
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProductSurfaces(existing.slug)
+  return { ok: true }
+}
+
+/** Toggle the catalog Featured flag from the products list. */
+export async function setProductFeatured(
+  productId: string,
+  featured: boolean,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: existing, error: loadError } = await db
+    .from('products')
+    .select('id, slug, featured')
+    .eq('id', productId)
+    .maybeSingle()
+
+  if (loadError || !existing) {
+    return { ok: false, error: loadError?.message ?? 'Product not found.' }
+  }
+
+  if (Boolean(existing.featured) === featured) return { ok: true }
+
+  const { error } = await db
+    .from('products')
+    .update({ featured })
+    .eq('id', productId)
+
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProductSurfaces(existing.slug)
+  revalidateTag(`admin-product-${productId}`)
+  return { ok: true }
+}
+
+/**
+ * Permanently delete a product, its media files, and related references.
+ */
+export async function deleteProduct(productId: string): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: product, error: loadError } = await db
+    .from('products')
+    .select('id, slug, name')
+    .eq('id', productId)
+    .maybeSingle()
+
+  if (loadError || !product) {
+    return { ok: false, error: loadError?.message ?? 'Product not found.' }
+  }
+
+  const { data: mediaRows } = await db
+    .from('product_media')
+    .select('media_type, storage_path')
+    .eq('product_id', productId)
+
+  const imagePaths: string[] = []
+  const videoPaths: string[] = []
+  for (const row of mediaRows ?? []) {
+    if (
+      row.storage_path.startsWith('/') ||
+      row.storage_path.startsWith('http')
+    ) {
+      continue
+    }
+    if (row.media_type === 'video') videoPaths.push(row.storage_path)
+    else imagePaths.push(row.storage_path)
+  }
+
+  // Strip this product from other products' related lists before delete.
+  const { data: relatedOwners } = await db
+    .from('products')
+    .select('id, related_product_ids, slug')
+    .contains('related_product_ids', [productId])
+
+  for (const owner of relatedOwners ?? []) {
+    const nextIds = ((owner.related_product_ids ?? []) as string[]).filter(
+      (id: string) => id !== productId,
+    )
+    await db
+      .from('products')
+      .update({ related_product_ids: nextIds })
+      .eq('id', owner.id)
+    revalidateProductSurfaces(owner.slug)
+  }
+
+  const { error } = await db.from('products').delete().eq('id', productId)
+  if (error) return { ok: false, error: error.message }
+
+  if (imagePaths.length > 0) {
+    await deleteObjects(
+      PRODUCT_IMAGE_BUCKET,
+      imagePaths.flatMap((path) => mediaObjectPathsIncludingVariants(path)),
+    )
+  }
+  if (videoPaths.length > 0) {
+    await deleteObjects(PRODUCT_VIDEO_BUCKET, videoPaths)
+  }
+
+  revalidateProductSurfaces(product.slug)
+  revalidateTag(`admin-product-${productId}`)
+  return { ok: true }
+}
+
+async function runBulkProductAction(
+  productIds: string[],
+  runOne: (productId: string) => Promise<ActionResult>,
+): Promise<ActionResult<BulkProductActionResult>> {
+  await requireRole(['admin', 'manager'])
+
+  const uniqueIds = [
+    ...new Set(productIds.map((id) => id.trim()).filter(Boolean)),
+  ]
+  if (uniqueIds.length === 0) {
+    return { ok: false, error: 'No products selected.' }
+  }
+  if (uniqueIds.length > BULK_PRODUCT_ACTION_LIMIT) {
+    return {
+      ok: false,
+      error: `Select at most ${BULK_PRODUCT_ACTION_LIMIT} products at a time.`,
+    }
+  }
+
+  const db = await createClient()
+  const { data: productRows } = await db
+    .from('products')
+    .select('id, name')
+    .in('id', uniqueIds)
+  const nameById = new Map((productRows ?? []).map((row) => [row.id, row.name]))
+
+  const failures: BulkProductFailure[] = []
+  let okCount = 0
+
+  for (const productId of uniqueIds) {
+    const result = await runOne(productId)
+    if (result.ok) {
+      okCount += 1
+      continue
+    }
+    failures.push({
+      productId,
+      productName: nameById.get(productId) ?? null,
+      error: result.error,
+    })
+  }
+
+  revalidatePath('/admin/catalog')
+  revalidatePath('/admin/catalog/products')
+  revalidateTag('admin-products')
+  // Individual actions already revalidate; one more pass covers early no-op returns.
+  revalidateStorefront()
+
+  return {
+    ok: true,
+    data: {
+      okCount,
+      failCount: failures.length,
+      failures,
+    },
+  }
+}
+
+/** Soft-archive (unpublish) many products. */
+export async function archiveProducts(
+  productIds: string[],
+): Promise<ActionResult<BulkProductActionResult>> {
+  return runBulkProductAction(productIds, (id) => setProductActive(id, false))
+}
+
+/** Publish or unpublish many products. */
+export async function setProductsActive(
+  productIds: string[],
+  active: boolean,
+): Promise<ActionResult<BulkProductActionResult>> {
+  return runBulkProductAction(productIds, (id) => setProductActive(id, active))
+}
+
+/** Permanently delete many products. Continues after individual failures. */
+export async function deleteProducts(
+  productIds: string[],
+): Promise<ActionResult<BulkProductActionResult>> {
+  return runBulkProductAction(productIds, deleteProduct)
+}
+
+/**
+ * Replace all variants for a product from JSON payload.
+ */
+export async function saveProductVariants(
+  productId: string,
+  formData: FormData,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const parsed = parseVariantsJson(readString(formData, 'variants_json'))
+  if ('error' in parsed) return { ok: false, error: parsed.error }
+
+  const requiresSizeRaw = formData.get('requires_size')
+  const requiresSize =
+    requiresSizeRaw == null
+      ? true
+      : requiresSizeRaw === 'on' ||
+        requiresSizeRaw === 'true' ||
+        requiresSizeRaw === '1'
+
+  if (requiresSize) {
+    for (const variant of parsed.filter((v) => v.active)) {
+      if (variant.size_eu <= 0) {
+        return {
+          ok: false,
+          error: 'Every active size row needs a valid EU size greater than zero.',
+        }
+      }
+    }
+  } else {
+    const byColor = new Map<string, typeof parsed>()
+    for (const variant of parsed) {
+      variant.size_eu = ONE_SIZE_EU
+      if (!variant.active) continue
+      const key = (variant.color ?? '').trim().toLowerCase()
+      const list = byColor.get(key) ?? []
+      list.push(variant)
+      byColor.set(key, list)
+    }
+    for (const [, group] of byColor) {
+      if (group.length > 1) {
+        return {
+          ok: false,
+          error: `“${group[0]?.color}” should only have one stock row when size variation is off.`,
+        }
+      }
+    }
+  }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug, active')
+    .eq('id', productId)
+    .maybeSingle()
+
+  if (!product) return { ok: false, error: 'Product not found.' }
+
+  // Prefer colorway-tagged gallery images as the swatch for each color.
+  const { data: mediaRows } = await db
+    .from('product_media')
+    .select('id, color, sort_order')
+    .eq('product_id', productId)
+    .eq('media_type', 'image')
+    .order('sort_order', { ascending: true })
+
+  const primaryByColor = new Map<string, string>()
+  for (const row of mediaRows ?? []) {
+    const key = row.color?.trim().toLowerCase()
+    if (!key || primaryByColor.has(key)) continue
+    primaryByColor.set(key, row.id)
+  }
+  for (const variant of parsed) {
+    const key = variant.color?.trim().toLowerCase()
+    if (!key) continue
+    const fromGallery = primaryByColor.get(key)
+    if (fromGallery) variant.media_id = fromGallery
+  }
+
+  const { data: existing } = await db
+    .from('product_variants')
+    .select('id')
+    .eq('product_id', productId)
+
+  const keepIds = new Set(
+    parsed.map((v) => v.id).filter((id): id is string => Boolean(id)),
+  )
+  const toDelete = (existing ?? [])
+    .map((v) => v.id)
+    .filter((id) => !keepIds.has(id))
+
+  if (toDelete.length > 0) {
+    // Hard-delete removed rows. order_items already snapshots name/size/color/sku
+    // and variant_id is ON DELETE SET NULL, so past orders stay readable.
+    const { error: deleteError } = await db
+      .from('product_variants')
+      .delete()
+      .in('id', toDelete)
+    if (deleteError) {
+      return { ok: false, error: deleteError.message }
+    }
+  }
+
+  const toUpdate = parsed.filter((v) => v.id)
+  const toInsert = parsed.filter((v) => !v.id)
+
+  async function writeVariantUpdate(variant: VariantInput & { id: string }) {
+    const { error } = await db
+      .from('product_variants')
+      .update({
+        size_eu: variant.size_eu,
+        color: variant.color,
+        color_hex: variant.color_hex,
+        media_id: variant.media_id ?? null,
+        sku: variant.sku,
+        stock: variant.stock,
+        active: variant.active,
+      })
+      .eq('id', variant.id)
+      .eq('product_id', productId)
+    return error
+  }
+
+  if (toUpdate.length > 0) {
+    const updateResults = await Promise.all(
+      toUpdate.map((variant) =>
+        writeVariantUpdate({ ...variant, id: variant.id! }),
+      ),
+    )
+    for (const error of updateResults) {
+      if (!error) continue
+      if (error.code === '23505') {
+        return { ok: false, error: 'Duplicate size/color combination.' }
+      }
+      return { ok: false, error: error.message }
+    }
+  }
+
+  if (toInsert.length > 0) {
+    // Reclaim any leftover inactive rows (from older soft-delete behavior) that
+    // match size+color so unique(product, size, color) does not block re-adds.
+    const { data: inactiveRows } = await db
+      .from('product_variants')
+      .select('id, size_eu, color')
+      .eq('product_id', productId)
+      .eq('active', false)
+
+    const inactiveByKey = new Map(
+      (inactiveRows ?? []).map((row) => [
+        `${Number(row.size_eu)}::${(row.color ?? '').trim().toLowerCase()}`,
+        row.id,
+      ]),
+    )
+
+    const reclaim: Array<VariantInput & { id: string }> = []
+    const fresh: VariantInput[] = []
+    for (const variant of toInsert) {
+      const key = `${variant.size_eu}::${(variant.color ?? '').trim().toLowerCase()}`
+      const existingId = inactiveByKey.get(key)
+      if (existingId) {
+        reclaim.push({ ...variant, id: existingId, active: true })
+        inactiveByKey.delete(key)
+      } else {
+        fresh.push(variant)
+      }
+    }
+
+    if (reclaim.length > 0) {
+      const reclaimResults = await Promise.all(
+        reclaim.map((variant) => writeVariantUpdate(variant)),
+      )
+      for (const error of reclaimResults) {
+        if (!error) continue
+        if (error.code === '23505') {
+          return { ok: false, error: 'Duplicate size/color combination.' }
+        }
+        return { ok: false, error: error.message }
+      }
+    }
+
+    if (fresh.length > 0) {
+      const { error } = await db.from('product_variants').insert(
+        fresh.map((variant) => ({
+          product_id: productId,
+          size_eu: variant.size_eu,
+          color: variant.color,
+          color_hex: variant.color_hex,
+          media_id: variant.media_id ?? null,
+          sku: variant.sku,
+          stock: variant.stock,
+          active: variant.active,
+        })),
+      )
+      if (error) {
+        if (error.code === '23505') {
+          return { ok: false, error: 'Duplicate size/color combination.' }
+        }
+        return { ok: false, error: error.message }
+      }
+    }
+  }
+
+  // Stay draft (or drop to draft) when sellable variants are incomplete.
+  if (product.active) {
+    const stillReady = parsed.some(
+      (v) => v.active && Boolean(v.color?.trim()),
+    )
+    if (!stillReady) {
+      await db
+        .from('products')
+        .update({ active: false })
+        .eq('id', productId)
+    }
+  }
+
+  revalidateProductSurfaces(product.slug)
+  revalidateTag(`admin-product-${productId}`)
+  return { ok: true }
+}
+
+/**
+ * Update a single variant's stock without touching other variant fields.
+ * Safe for the Inventory page — does not delete sibling variants.
+ */
+export async function updateVariantStock(
+  variantId: string,
+  stock: number,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+
+  const nextStock = Math.floor(Number(stock))
+  if (!Number.isFinite(nextStock) || nextStock < 0) {
+    return { ok: false, error: 'Stock must be a whole number zero or greater.' }
+  }
+
+  const db = await createClient()
+
+  const { data: variant, error: lookupError } = await db
+    .from('product_variants')
+    .select('id, product_id')
+    .eq('id', variantId)
+    .maybeSingle()
+
+  if (lookupError) return { ok: false, error: lookupError.message }
+  if (!variant) return { ok: false, error: 'Variant not found.' }
+
+  const { data: product, error: productError } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', variant.product_id)
+    .maybeSingle()
+
+  if (productError) return { ok: false, error: productError.message }
+  if (!product?.slug) return { ok: false, error: 'Product not found.' }
+
+  const { error } = await db
+    .from('product_variants')
+    .update({ stock: nextStock })
+    .eq('id', variantId)
+
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProductSurfaces(product.slug)
+  revalidateTag(`admin-product-${variant.product_id}`)
+  return { ok: true }
+}
+
+/**
+ * Lightweight product search for You May Also Like picker.
+ * Empty query returns [] — client should not call until the user types.
+ */
+export async function searchRelatedProductOptions(
+  productId: string,
+  query: string,
+): Promise<RelatedProductOption[]> {
+  const safe = query.replace(/[%_,.()]/g, '').trim()
+  if (!safe) return []
+
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data } = await db
+    .from('products')
+    .select('id, name, slug, active')
+    .neq('id', productId)
+    .or(`name.ilike.%${safe}%,slug.ilike.%${safe}%`)
+    .order('name', { ascending: true })
+    .limit(8)
+
+  return data ?? []
+}
+
+/**
+ * Persist ordered related product IDs (excludes self, capped).
+ */
+export async function saveRelatedProducts(
+  productId: string,
+  formData: FormData,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  let ids: string[] = []
+  try {
+    const raw = JSON.parse(readString(formData, 'related_ids_json') || '[]') as unknown
+    if (!Array.isArray(raw)) {
+      return { ok: false, error: 'Related products payload must be an array.' }
+    }
+    ids = raw
+      .filter((id): id is string => typeof id === 'string')
+      .filter((id) => id !== productId)
+      .slice(0, RELATED_PRODUCTS_DISPLAY_CAP)
+  } catch {
+    return { ok: false, error: 'Could not parse related products.' }
+  }
+
+  const { data: product, error } = await db
+    .from('products')
+    .update({ related_product_ids: ids })
+    .eq('id', productId)
+    .select('slug')
+    .single()
+
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProductSurfaces(product.slug)
+  return { ok: true }
+}

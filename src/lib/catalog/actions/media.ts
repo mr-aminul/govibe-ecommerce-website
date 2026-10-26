@@ -1,0 +1,470 @@
+'use server'
+
+import { revalidatePath, revalidateTag } from 'next/cache'
+import { requireRole } from '@/lib/auth/session'
+import { adminProductPath } from '@/lib/admin/paths'
+import { revalidateStorefront } from '@/lib/catalog/cache-tags'
+import {
+  ALLOWED_IMAGE_TYPES,
+  ALLOWED_VIDEO_TYPES,
+  IMAGE_MAX_BYTES,
+  MAX_PRODUCT_VIDEOS,
+  PRODUCT_IMAGE_BUCKET,
+  PRODUCT_VIDEO_BUCKET,
+  VIDEO_MAX_BYTES,
+} from '@/lib/catalog/constants'
+import { colorwayKey } from '@/lib/catalog/colorway'
+import { extractDominantColor } from '@/lib/catalog/extract-dominant-color'
+import { optimizeProductImage } from '@/lib/catalog/optimize-image'
+import type { ActionResult } from '@/lib/catalog/types'
+import {
+  deleteObject,
+  isObjectStoreConfigured,
+  uploadObject,
+} from '@/lib/media/object-store'
+import {
+  deleteImageWithVariants,
+  uploadImageWidthVariants,
+} from '@/lib/media/variants'
+import { createClient } from '@/lib/db/server'
+
+function revalidateProduct(productId: string, slug?: string) {
+  if (slug) revalidatePath(adminProductPath(slug))
+  revalidatePath('/admin/catalog')
+  revalidateStorefront(slug)
+  revalidateTag('admin-products')
+  revalidateTag(`admin-product-${productId}`)
+  if (slug) revalidateTag(`admin-product-slug-${slug}`)
+}
+
+function extensionFor(type: string): string {
+  if (type === 'image/png') return 'png'
+  if (type === 'image/webp') return 'webp'
+  if (type === 'image/gif') return 'gif'
+  if (type === 'video/webm') return 'webm'
+  if (type === 'video/mp4') return 'mp4'
+  return 'jpg'
+}
+
+/**
+ * Upload product image or video to Storage and insert media row.
+ */
+export async function uploadProductMedia(
+  productId: string,
+  formData: FormData,
+): Promise<ActionResult<{ id: string }>> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const file = formData.get('file')
+  if (!(file instanceof File) || file.size === 0) {
+    return { ok: false, error: 'Choose a file to upload.' }
+  }
+
+  const alt = String(formData.get('alt') ?? '').trim() || null
+  const colorRaw = String(formData.get('color') ?? '').trim()
+  const color = colorRaw ? colorRaw.replace(/\s+/g, ' ') : null
+  const colorHexRaw = String(formData.get('color_hex') ?? '').trim()
+  let colorHex: string | null = null
+  if (colorHexRaw) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(colorHexRaw)) {
+      return { ok: false, error: 'Color hex must be a #RRGGBB value.' }
+    }
+    colorHex = colorHexRaw.toUpperCase()
+  }
+  const isVideo = file.type.startsWith('video/')
+  const mediaType = isVideo ? 'video' : 'image'
+
+  if (isVideo) {
+    if (!(ALLOWED_VIDEO_TYPES as readonly string[]).includes(file.type)) {
+      return { ok: false, error: 'Video must be MP4 or WebM.' }
+    }
+    if (file.size > VIDEO_MAX_BYTES) {
+      return {
+        ok: false,
+        error:
+          'Video must be 12MB or smaller. Compress it first (or use a shorter clip) — videos are stored as uploaded.',
+      }
+    }
+  } else {
+    if (!(ALLOWED_IMAGE_TYPES as readonly string[]).includes(file.type)) {
+      return { ok: false, error: 'Image must be JPEG, PNG, WebP, or GIF.' }
+    }
+    if (file.size > IMAGE_MAX_BYTES) {
+      return { ok: false, error: 'Image must be 20MB or smaller.' }
+    }
+  }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', productId)
+    .maybeSingle()
+  if (!product) return { ok: false, error: 'Product not found.' }
+
+  const { data: existing } = await db
+    .from('product_media')
+    .select('id, media_type, sort_order')
+    .eq('product_id', productId)
+
+  const images = (existing ?? []).filter((m) => m.media_type === 'image')
+  const videos = (existing ?? []).filter((m) => m.media_type === 'video')
+
+  if (mediaType === 'video' && videos.length >= MAX_PRODUCT_VIDEOS) {
+    return { ok: false, error: 'Only one product video is allowed. Remove the existing one first.' }
+  }
+
+  const bucket = isVideo ? PRODUCT_VIDEO_BUCKET : PRODUCT_IMAGE_BUCKET
+  const originalBytes = Buffer.from(await file.arrayBuffer())
+
+  let uploadBody: Buffer = originalBytes
+  let contentType = file.type
+  let ext = extensionFor(file.type)
+
+  if (!isVideo) {
+    if (!colorHex) {
+      colorHex = await extractDominantColor(originalBytes)
+    }
+
+    try {
+      const optimized = await optimizeProductImage(originalBytes, file.type, {
+        square: true,
+      })
+      if (optimized) {
+        uploadBody = optimized.buffer
+        contentType = optimized.contentType
+        ext = optimized.extension
+      } else if (file.type === 'image/gif' && originalBytes.byteLength > 2 * 1024 * 1024) {
+        return {
+          ok: false,
+          error:
+            'Animated GIFs over 2MB are not allowed. Convert to MP4/WebM or use a still image.',
+        }
+      }
+    } catch {
+      // Fall back to the original file if decode/encode fails.
+    }
+  }
+
+  const storagePath = `${productId}/${crypto.randomUUID()}.${ext}`
+
+  if (!isObjectStoreConfigured()) {
+    return { ok: false, error: 'Media storage is not configured.' }
+  }
+  const uploaded = await uploadObject({
+    bucket,
+    path: storagePath,
+    body: uploadBody,
+    contentType,
+  })
+  if (!uploaded.ok) return { ok: false, error: uploaded.error }
+
+  if (!isVideo && contentType !== 'image/gif') {
+    await uploadImageWidthVariants({
+      bucket,
+      objectPath: storagePath,
+      bytes: uploadBody,
+    })
+  }
+
+  const nextSort =
+    mediaType === 'image'
+      ? images.reduce((max, m) => Math.max(max, m.sort_order), -1) + 1
+      : 0
+
+  const { data: row, error } = await db
+    .from('product_media')
+    .insert({
+      product_id: productId,
+      media_type: mediaType,
+      storage_path: storagePath,
+      alt,
+      sort_order: nextSort,
+      color: mediaType === 'image' ? color : null,
+      color_hex: mediaType === 'image' ? colorHex : null,
+    })
+    .select('id')
+    .single()
+
+  if (error) {
+    if (isVideo) {
+      await deleteObject(bucket, storagePath)
+    } else {
+      await deleteImageWithVariants(bucket, storagePath)
+    }
+    return { ok: false, error: error.message }
+  }
+
+  // Keep variant swatches in sync when this upload is tagged to a colorway.
+  if (mediaType === 'image' && color && colorHex) {
+    const { data: variants } = await db
+      .from('product_variants')
+      .select('id, color')
+      .eq('product_id', productId)
+
+    const matchingIds = (variants ?? [])
+      .filter((variant) => colorwayKey(variant.color) === colorwayKey(color))
+      .map((variant) => variant.id)
+
+    if (matchingIds.length > 0) {
+      await db
+        .from('product_variants')
+        .update({ color_hex: colorHex })
+        .in('id', matchingIds)
+    }
+  }
+
+  revalidateProduct(productId, product.slug)
+  return { ok: true, data: { id: row.id } }
+}
+
+/**
+ * Delete media row and storage object.
+ */
+export async function deleteProductMedia(
+  mediaId: string,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: media, error: loadError } = await db
+    .from('product_media')
+    .select('id, product_id, media_type, storage_path')
+    .eq('id', mediaId)
+    .maybeSingle()
+
+  if (loadError || !media) {
+    return { ok: false, error: loadError?.message ?? 'Media not found.' }
+  }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', media.product_id)
+    .maybeSingle()
+
+  const { error } = await db
+    .from('product_media')
+    .delete()
+    .eq('id', mediaId)
+
+  if (error) return { ok: false, error: error.message }
+
+  // Only remove Storage objects — leave local /public paths alone.
+  if (
+    !media.storage_path.startsWith('/') &&
+    !media.storage_path.startsWith('http')
+  ) {
+    if (media.media_type === 'video') {
+      await deleteObject(PRODUCT_VIDEO_BUCKET, media.storage_path)
+    } else {
+      await deleteImageWithVariants(PRODUCT_IMAGE_BUCKET, media.storage_path)
+    }
+  }
+
+  revalidateProduct(media.product_id, product?.slug)
+  return { ok: true }
+}
+
+/**
+ * Persist image gallery order (IDs in desired order). First becomes primary.
+ */
+export async function reorderProductMedia(
+  productId: string,
+  orderedIds: string[],
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', productId)
+    .maybeSingle()
+
+  for (let index = 0; index < orderedIds.length; index += 1) {
+    const { error } = await db
+      .from('product_media')
+      .update({ sort_order: index })
+      .eq('id', orderedIds[index])
+      .eq('product_id', productId)
+      .eq('media_type', 'image')
+    if (error) return { ok: false, error: error.message }
+  }
+
+  revalidateProduct(productId, product?.slug)
+  return { ok: true }
+}
+
+/**
+ * Update alt text for a media row.
+ */
+export async function updateMediaAlt(
+  mediaId: string,
+  alt: string,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: media, error: loadError } = await db
+    .from('product_media')
+    .select('product_id')
+    .eq('id', mediaId)
+    .maybeSingle()
+
+  if (loadError || !media) {
+    return { ok: false, error: loadError?.message ?? 'Media not found.' }
+  }
+
+  const { error } = await db
+    .from('product_media')
+    .update({ alt: alt.trim() || null })
+    .eq('id', mediaId)
+
+  if (error) return { ok: false, error: error.message }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', media.product_id)
+    .maybeSingle()
+
+  revalidateProduct(media.product_id, product?.slug)
+  return { ok: true }
+}
+
+/**
+ * Tag a gallery image with a colorway name (null = shared / unassigned).
+ */
+export async function updateMediaColorway(
+  mediaId: string,
+  color: string | null,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: media, error: loadError } = await db
+    .from('product_media')
+    .select('id, media_type, product_id')
+    .eq('id', mediaId)
+    .maybeSingle()
+
+  if (loadError || !media) {
+    return { ok: false, error: loadError?.message ?? 'Media not found.' }
+  }
+  if (media.media_type !== 'image') {
+    return { ok: false, error: 'Only images can be tagged with a color.' }
+  }
+
+  const nextColor = color?.trim().replace(/\s+/g, ' ') || null
+
+  const { error } = await db
+    .from('product_media')
+    .update({ color: nextColor })
+    .eq('id', mediaId)
+
+  if (error) return { ok: false, error: error.message }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', media.product_id)
+    .maybeSingle()
+
+  revalidateProduct(media.product_id, product?.slug)
+  return { ok: true }
+}
+
+/** @deprecated Prefer updateMediaColorway (name-based). */
+export async function updateMediaColor(
+  mediaId: string,
+  colorHex: string | null,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: media, error: loadError } = await db
+    .from('product_media')
+    .select('product_id, media_type')
+    .eq('id', mediaId)
+    .maybeSingle()
+
+  if (loadError || !media) {
+    return { ok: false, error: loadError?.message ?? 'Media not found.' }
+  }
+  if (media.media_type !== 'image') {
+    return { ok: false, error: 'Only images can be tagged with a color.' }
+  }
+
+  let nextHex: string | null = null
+  if (colorHex) {
+    const trimmed = colorHex.trim()
+    if (!/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+      return { ok: false, error: 'Color must be a #RRGGBB hex value.' }
+    }
+    nextHex = trimmed.toUpperCase()
+  }
+
+  const { error } = await db
+    .from('product_media')
+    .update({ color_hex: nextHex })
+    .eq('id', mediaId)
+
+  if (error) return { ok: false, error: error.message }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', media.product_id)
+    .maybeSingle()
+
+  revalidateProduct(media.product_id, product?.slug)
+  return { ok: true }
+}
+
+/**
+ * Clear all gallery images tagged to a colorway name (make them shared again).
+ */
+export async function clearColorwayMedia(
+  productId: string,
+  color: string,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const trimmed = color.trim().replace(/\s+/g, ' ')
+  if (!trimmed) {
+    return { ok: false, error: 'Color name is required.' }
+  }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug')
+    .eq('id', productId)
+    .maybeSingle()
+  if (!product) return { ok: false, error: 'Product not found.' }
+
+  const { data: rows } = await db
+    .from('product_media')
+    .select('id, color')
+    .eq('product_id', productId)
+    .eq('media_type', 'image')
+
+  const ids = (rows ?? [])
+    .filter(
+      (row) =>
+        row.color?.trim().toLowerCase() === trimmed.toLowerCase(),
+    )
+    .map((row) => row.id)
+
+  if (ids.length > 0) {
+    const { error } = await db
+      .from('product_media')
+      .update({ color: null })
+      .in('id', ids)
+    if (error) return { ok: false, error: error.message }
+  }
+
+  revalidateProduct(productId, product.slug)
+  return { ok: true }
+}
