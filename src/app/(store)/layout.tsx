@@ -1,6 +1,10 @@
 import { getStorefrontAnnouncement } from '@/lib/campaigns/queries'
+import { listStoreCategories } from '@/lib/catalog/queries'
 import { getPublicMarketingConfig } from '@/lib/integrations/marketing-settings'
-import { getSiteContent } from '@/lib/website/queries'
+import {
+  getNavigationContent,
+  getSiteContent,
+} from '@/lib/website/queries'
 import { MarketingTags } from '@/components/MarketingTags'
 import { StoreProviders } from '@/components/StoreProviders'
 
@@ -9,16 +13,24 @@ export default async function StoreLayout({
 }: {
   children: React.ReactNode
 }) {
-  const [marketing, announcement, site] = await Promise.all([
-    getPublicMarketingConfig(),
-    getStorefrontAnnouncement(),
-    getSiteContent(),
-  ])
+  const [marketing, announcement, site, categories, navigation] =
+    await Promise.all([
+      getPublicMarketingConfig(),
+      getStorefrontAnnouncement(),
+      getSiteContent(),
+      listStoreCategories(),
+      getNavigationContent(),
+    ])
 
   return (
     <>
       <MarketingTags config={marketing} />
-      <StoreProviders announcement={announcement} site={site}>
+      <StoreProviders
+        announcement={announcement}
+        categories={categories}
+        navigation={navigation}
+        site={site}
+      >
         {children}
       </StoreProviders>
     </>

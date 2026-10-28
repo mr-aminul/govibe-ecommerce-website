@@ -11,15 +11,20 @@ import { ToastHost } from '@/components/ToastHost'
 import { MarketingPopup } from '@/components/MarketingPopup'
 import { VisitorBeacon } from '@/components/VisitorBeacon'
 import { WhatsAppBubble } from '@/components/WhatsAppBubble'
-import type { SiteContent } from '@/lib/website/types'
+import type { CategoryView } from '@/lib/catalog/types'
+import type { NavigationContent, SiteContent } from '@/lib/website/types'
 
 export function StoreProviders({
   children,
   announcement,
+  categories = [],
+  navigation,
   site,
 }: {
   children: ReactNode
   announcement?: string | null
+  categories?: CategoryView[]
+  navigation: NavigationContent
   site: SiteContent
 }) {
   return (
@@ -27,7 +32,11 @@ export function StoreProviders({
       <CartProvider>
         <OrdersProvider>
           <Suspense fallback={null}>
-            <Header announcement={announcement} />
+            <Header
+              announcement={announcement}
+              categories={categories}
+              navigation={navigation}
+            />
           </Suspense>
           <main className="flex-1">
             <PageTransition>{children}</PageTransition>

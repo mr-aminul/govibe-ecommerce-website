@@ -158,6 +158,28 @@ export type MarketingPopupContent = {
   campaignKey: string
 }
 
+/**
+ * One header nav row (Website → Navigation).
+ * `categorySlugs` are nested under the item in the order listed.
+ */
+export type NavigationItemContent = {
+  id: string
+  label: string
+  href: string
+  enabled: boolean
+  /** Sale-style emphasis (underline accent). */
+  accent: boolean
+  /** Product category slugs shown as indented / dropdown children. */
+  categorySlugs: string[]
+}
+
+/** Header navigation structure (Website → Navigation). */
+export type NavigationContent = {
+  /** Logo in the header / mobile menu (dark mark on light bar). */
+  logoSrc: string
+  items: NavigationItemContent[]
+}
+
 /** Global brand, footer, and product-page promises (Website → Site settings). */
 export type SiteContent = {
   brand: {
@@ -203,6 +225,7 @@ export type SitePageContentMap = {
   home: HomePageContent
   about: AboutPageContent
   site: SiteContent
+  navigation: NavigationContent
 }
 
 export type SitePageContent<K extends SitePageKey = SitePageKey> =

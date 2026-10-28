@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useSearchParams } from 'next/navigation'
 import {
+  ChevronDown,
   Heart,
   Menu,
   Package,
@@ -16,16 +17,12 @@ import { useCart } from '@/context/CartContext'
 import { useOrders } from '@/context/OrdersContext'
 import { BrandLogo } from '@/components/BrandLogo'
 import { drawerTransition } from '@/lib/motion'
-
-const links = [
-  { to: '/', label: 'Home' },
-  { to: '/shop', label: 'Shop' },
-  { to: '/shop?category=backpacks', label: 'Backpacks' },
-  { to: '/shop?category=crossbody', label: 'Crossbody' },
-  { to: '/shop?category=slings', label: 'Slings' },
-  { to: '/about', label: 'About' },
-  { to: '/shop?sale=1', label: 'Sale', accent: true },
-]
+import type { CategoryView } from '@/lib/catalog/types'
+import {
+  resolveStorefrontNav,
+  type StorefrontNavLink,
+} from '@/lib/catalog/nav'
+import type { NavigationContent } from '@/lib/website/types'
 
 function isNavLinkActive(
   href: string,
@@ -34,19 +31,46 @@ function isNavLinkActive(
 ) {
   const [path, query] = href.split('?')
   if (pathname !== path) return false
-  if (!query) return !searchParams.toString()
-  return searchParams.toString().includes(query)
+  if (!query) {
+    return (
+      !searchParams.get('category') &&
+      !searchParams.get('department') &&
+      !searchParams.get('sale')
+    )
+  }
+  const wanted = new URLSearchParams(query)
+  for (const [key, value] of wanted.entries()) {
+    if (searchParams.get(key) !== value) return false
+  }
+  return true
+}
+
+function isParentActive(
+  link: StorefrontNavLink,
+  pathname: string,
+  searchParams: URLSearchParams,
+) {
+  if (isNavLinkActive(link.to, pathname, searchParams)) return true
+  if (pathname !== '/shop') return false
+  const category = searchParams.get('category')
+  if (!category || !link.children?.length) return false
+  return link.children.some((child) => child.slug === category)
 }
 
 export function Header({
   announcement = null,
+  categories = [],
+  navigation,
 }: {
   announcement?: string | null
+  categories?: CategoryView[]
+  navigation: NavigationContent
 }) {
   const { cartCount, wishlist, hydrated: cartHydrated } = useCart()
   const { orderCount, hydrated: ordersHydrated } = useOrders()
   const [open, setOpen] = useState(false)
   const [scrolled, setScrolled] = useState(false)
+  const [desktopOpen, setDesktopOpen] = useState<string | null>(null)
   const reduceMotion = useReducedMotion()
   // Providers sit outside <Suspense>; their hydrate effects can commit before
   // Header finishes hydrating. Gate client-only UI on a local mount flag so the
@@ -58,12 +82,14 @@ export function Header({
   const showCartBadge = mounted && cartHydrated && cartCount > 0
   const showWishlistBadge = mounted && cartHydrated && wishlist.length > 0
 
-  const navLinks = [
-    ...links,
-    ...(showOrdersLink
-      ? [{ to: '/orders', label: 'Your Orders', accent: false }]
-      : []),
-  ]
+  const navLinks = useMemo(() => {
+    const links = resolveStorefrontNav(navigation, categories)
+    if (!showOrdersLink) return links
+    return [
+      ...links,
+      { id: 'orders', to: '/orders', label: 'Your Orders' },
+    ]
+  }, [navigation, categories, showOrdersLink])
 
   const iconBtnClass =
     'flex h-10 w-10 items-center justify-center rounded-full text-navy/70 transition hover:bg-navy/8 hover:text-navy'
@@ -74,6 +100,7 @@ export function Header({
 
   useEffect(() => {
     setOpen(false)
+    setDesktopOpen(null)
   }, [pathname, searchParams])
 
   useEffect(() => {
@@ -106,30 +133,105 @@ export function Header({
             <Menu className="h-5 w-5" />
           </button>
 
-          <BrandLogo />
+          <BrandLogo src={navigation.logoSrc} />
 
-          <nav className="hidden items-center gap-7 lg:flex">
+          <nav className="hidden items-center gap-6 lg:flex xl:gap-7">
             {navLinks.map((link) => {
-              const active = isNavLinkActive(link.to, pathname, searchParams)
+              const hasChildren = Boolean(link.children?.length)
+              const active = isParentActive(link, pathname, searchParams)
+              const menuOpen = desktopOpen === link.id
+
+              if (!hasChildren) {
+                return (
+                  <Link
+                    key={link.id}
+                    href={link.to}
+                    className={`relative text-[13px] tracking-wide transition ${link.accent
+                      ? 'font-semibold text-ink underline decoration-ink/40 underline-offset-4 hover:decoration-ink'
+                      : active
+                        ? 'font-semibold text-navy'
+                        : 'font-medium text-ink/70 hover:text-navy'
+                      }`}
+                  >
+                    {link.label}
+                    {active && !link.accent ? (
+                      <span
+                        aria-hidden
+                        className="absolute -bottom-1 left-0 right-0 h-0.5 rounded-full bg-navy"
+                      />
+                    ) : null}
+                  </Link>
+                )
+              }
+
               return (
-                <Link
-                  key={link.to + link.label}
-                  href={link.to}
-                  className={`relative text-[13px] tracking-wide transition ${link.accent
-                    ? 'font-semibold text-ink underline decoration-ink/40 underline-offset-4 hover:decoration-ink'
-                    : active
-                      ? 'font-semibold text-navy'
-                      : 'font-medium text-ink/70 hover:text-navy'
-                    }`}
+                <div
+                  key={link.id}
+                  className="relative"
+                  onMouseEnter={() => setDesktopOpen(link.id)}
+                  onMouseLeave={() => setDesktopOpen(null)}
                 >
-                  {link.label}
-                  {active && !link.accent ? (
-                    <span
+                  <Link
+                    href={link.to}
+                    className={`relative inline-flex items-center gap-1 text-[13px] tracking-wide transition ${
+                      active
+                        ? 'font-semibold text-navy'
+                        : 'font-medium text-ink/70 hover:text-navy'
+                    }`}
+                    aria-expanded={menuOpen}
+                    aria-haspopup="true"
+                  >
+                    {link.label}
+                    <ChevronDown
+                      className={`h-3.5 w-3.5 transition ${menuOpen ? 'rotate-180' : ''}`}
                       aria-hidden
-                      className="absolute -bottom-1 left-0 right-0 h-0.5 rounded-full bg-navy"
                     />
-                  ) : null}
-                </Link>
+                    {active ? (
+                      <span
+                        aria-hidden
+                        className="absolute -bottom-1 left-0 right-0 h-0.5 rounded-full bg-navy"
+                      />
+                    ) : null}
+                  </Link>
+                  <AnimatePresence>
+                    {menuOpen ? (
+                      <motion.div
+                        initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={reduceMotion ? undefined : { opacity: 0, y: 6 }}
+                        transition={
+                          reduceMotion
+                            ? { duration: 0 }
+                            : { duration: 0.16, ease: 'easeOut' }
+                        }
+                        className="absolute left-0 top-full z-50 min-w-[11rem] pt-3"
+                      >
+                        <div className="rounded-xl border border-navy/10 bg-white py-2 shadow-lift">
+                          {link.children!.map((child) => {
+                            const childActive = isNavLinkActive(
+                              child.to,
+                              pathname,
+                              searchParams,
+                            )
+                            return (
+                              <Link
+                                key={child.slug}
+                                href={child.to}
+                                className={`block px-4 py-2 text-[13px] transition ${
+                                  childActive
+                                    ? 'bg-navy/8 font-semibold text-navy'
+                                    : 'font-medium text-ink/75 hover:bg-navy/5 hover:text-navy'
+                                }`}
+                              >
+                                {child.label}
+                              </Link>
+                            )
+                          })}
+                        </div>
+                      </motion.div>
+                    ) : null}
+                  </AnimatePresence>
+                </div>
               )
             })}
           </nav>
@@ -201,7 +303,7 @@ export function Header({
               transition={reduceMotion ? { duration: 0 } : drawerTransition}
             >
               <div className="flex items-center justify-between border-b border-navy/10 px-5 py-4">
-                <BrandLogo heightClassName="h-7" />
+                <BrandLogo src={navigation.logoSrc} heightClassName="h-7" />
                 <button
                   type="button"
                   aria-label="Close menu"
@@ -211,22 +313,43 @@ export function Header({
                   <X className="h-5 w-5" />
                 </button>
               </div>
-              <nav className="flex flex-col gap-1 p-4">
+              <nav className="flex flex-col gap-0.5 overflow-y-auto p-4">
                 {navLinks.map((link) => {
-                  const active = isNavLinkActive(link.to, pathname, searchParams)
+                  const active = isParentActive(link, pathname, searchParams)
                   return (
-                    <Link
-                      key={link.to + link.label}
-                      href={link.to}
-                      className={`rounded-xl px-4 py-3 text-[15px] ${link.accent
-                        ? 'font-semibold text-ink underline decoration-ink/40 underline-offset-4'
-                        : active
-                          ? 'bg-navy/8 font-semibold text-navy'
-                          : 'font-medium text-ink hover:bg-navy/5 hover:text-navy'
-                        }`}
-                    >
-                      {link.label}
-                    </Link>
+                    <div key={link.id} className="flex flex-col">
+                      <Link
+                        href={link.to}
+                        className={`rounded-xl px-4 py-3 text-[15px] ${link.accent
+                          ? 'font-semibold text-ink underline decoration-ink/40 underline-offset-4'
+                          : active
+                            ? 'bg-navy/8 font-semibold text-navy'
+                            : 'font-medium text-ink hover:bg-navy/5 hover:text-navy'
+                          }`}
+                      >
+                        {link.label}
+                      </Link>
+                      {link.children?.map((child) => {
+                        const childActive = isNavLinkActive(
+                          child.to,
+                          pathname,
+                          searchParams,
+                        )
+                        return (
+                          <Link
+                            key={child.slug}
+                            href={child.to}
+                            className={`rounded-xl py-2.5 pl-10 pr-4 text-[14px] ${
+                              childActive
+                                ? 'bg-navy/8 font-semibold text-navy'
+                                : 'font-medium text-ink/70 hover:bg-navy/5 hover:text-navy'
+                            }`}
+                          >
+                            {child.label}
+                          </Link>
+                        )
+                      })}
+                    </div>
                   )
                 })}
               </nav>

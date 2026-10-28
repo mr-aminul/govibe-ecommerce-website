@@ -17,6 +17,8 @@ type SiteMediaPickerProps = {
   fallback?: string
   /** Extra classes on the outer frame (e.g. rounded corners when not clipped by a parent). */
   className?: string
+  /** Image/video fit inside the frame. Logos usually want `contain`. */
+  objectFit?: 'cover' | 'contain'
 }
 
 /**
@@ -32,7 +34,10 @@ export function SiteMediaPicker({
   aspectClassName = 'aspect-video',
   fallback = '/images/hero.png',
   className = '',
+  objectFit = 'cover',
 }: SiteMediaPickerProps) {
+  const fitClass =
+    objectFit === 'contain' ? 'object-contain' : 'object-cover'
   const inputRef = useRef<HTMLInputElement>(null)
   const [pending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
@@ -80,12 +85,12 @@ export function SiteMediaPicker({
         {isVideo && value ? (
           <video
             src={url}
-            className="h-full w-full object-cover"
+            className={`h-full w-full ${fitClass}`}
             muted
             playsInline
           />
         ) : (
-          <img src={url} alt="" className="h-full w-full object-cover" />
+          <img src={url} alt="" className={`h-full w-full ${fitClass}`} />
         )}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-3 opacity-0 transition-opacity duration-200 group-hover/media:pointer-events-auto group-hover/media:opacity-100 group-focus-within/media:pointer-events-auto group-focus-within/media:opacity-100">
           <button

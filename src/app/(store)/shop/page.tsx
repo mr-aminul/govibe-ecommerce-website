@@ -4,6 +4,7 @@ import {
   listStoreCategories,
   listStoreProducts,
 } from '@/lib/catalog/queries'
+import { getNavigationContent } from '@/lib/website/queries'
 
 export const metadata = {
   title: 'Shop',
@@ -12,9 +13,10 @@ export const metadata = {
 }
 
 export default async function Shop() {
-  const [products, categories] = await Promise.all([
+  const [products, categories, navigation] = await Promise.all([
     listStoreProducts(),
     listStoreCategories(),
+    getNavigationContent(),
   ])
 
   return (
@@ -25,7 +27,11 @@ export default async function Shop() {
         </div>
       }
     >
-      <ShopPage products={products} categories={categories} />
+      <ShopPage
+        products={products}
+        categories={categories}
+        navigation={navigation}
+      />
     </Suspense>
   )
 }

@@ -24,10 +24,7 @@ npm install
 cp .env.example .env.local
 ```
 
-3. Apply SQL migrations against **VPS Postgres** (SSH tunnel / `DATABASE_URL`), in order under `migrations/`.  
-   If this database was originally dumped from Supabase, also run:
-
-`migrations/20261021120000_drop_supabase_leftovers.sql`
+3. Apply SQL migrations against **VPS Postgres** (SSH tunnel / `DATABASE_URL`), in order under `migrations/`.
 
 4. Create a staff user in `profiles` (password hash via your auth bootstrap), then promote to admin if needed:
 

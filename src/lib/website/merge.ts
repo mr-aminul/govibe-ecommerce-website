@@ -12,6 +12,7 @@ import {
   DEFAULT_HOME_CONTENT,
   DEFAULT_HOME_SECTIONS,
   DEFAULT_MARKETING_POPUP,
+  DEFAULT_NAVIGATION_CONTENT,
   DEFAULT_SITE_CONTENT,
 } from '@/lib/website/defaults'
 import { normalizeSiteHref } from '@/lib/website/marketing-popup'
@@ -26,6 +27,8 @@ import type {
   HomeSectionsVisibility,
   MarketingPopupContent,
   MarketingPopupFrequency,
+  NavigationContent,
+  NavigationItemContent,
   PromoCardContent,
   SaleBannerContent,
   SiteContent,
@@ -310,6 +313,75 @@ export function mergeMarketingPopup(raw: unknown): MarketingPopupContent {
   }
 }
 
+function asSlugList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const slug = item.trim()
+    if (!slug || seen.has(slug)) continue
+    seen.add(slug)
+    out.push(slug)
+  }
+  return out
+}
+
+function asNavItem(
+  value: unknown,
+  fallback: NavigationItemContent,
+): NavigationItemContent | null {
+  const row = asRecord(value)
+  const id = asString(row.id, fallback.id).trim()
+  const label = asString(row.label, fallback.label).trim()
+  if (!id || !label) return null
+  return {
+    id,
+    label,
+    href: asString(row.href, fallback.href).trim() || fallback.href,
+    enabled: asBoolean(row.enabled, fallback.enabled),
+    accent: asBoolean(row.accent, fallback.accent),
+    categorySlugs: asSlugList(row.categorySlugs),
+  }
+}
+
+export function mergeNavigationContent(raw: unknown): NavigationContent {
+  const d = DEFAULT_NAVIGATION_CONTENT
+  const root = asRecord(raw)
+  const logoSrc = asString(root.logoSrc, d.logoSrc) || d.logoSrc
+
+  if (!Array.isArray(root.items) || root.items.length === 0) {
+    return {
+      logoSrc,
+      items: d.items.map((item) => ({
+        ...item,
+        categorySlugs: [...item.categorySlugs],
+      })),
+    }
+  }
+
+  const items: NavigationItemContent[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i < root.items.length; i++) {
+    const fallback = d.items[i] ?? d.items[0]
+    const item = asNavItem(root.items[i], fallback)
+    if (!item || seen.has(item.id)) continue
+    seen.add(item.id)
+    items.push(item)
+  }
+
+  return {
+    logoSrc,
+    items:
+      items.length > 0
+        ? items
+        : d.items.map((item) => ({
+            ...item,
+            categorySlugs: [...item.categorySlugs],
+          })),
+  }
+}
+
 export function mergeSiteContent(raw: unknown): SiteContent {
   const d = DEFAULT_SITE_CONTENT
   const root = asRecord(raw)
@@ -362,8 +434,9 @@ export function mergeSiteContent(raw: unknown): SiteContent {
 export function mergeSitePageContent(
   pageKey: SitePageKey,
   raw: unknown,
-): HomePageContent | AboutPageContent | SiteContent {
+): HomePageContent | AboutPageContent | SiteContent | NavigationContent {
   if (pageKey === 'home') return mergeHomeContent(raw)
   if (pageKey === 'about') return mergeAboutContent(raw)
+  if (pageKey === 'navigation') return mergeNavigationContent(raw)
   return mergeSiteContent(raw)
 }

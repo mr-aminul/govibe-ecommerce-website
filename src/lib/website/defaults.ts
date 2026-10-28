@@ -4,6 +4,7 @@ import type {
   AboutPageContent,
   HomePageContent,
   MarketingPopupContent,
+  NavigationContent,
   SiteContent,
 } from '@/lib/website/types'
 
@@ -155,6 +156,68 @@ export const DEFAULT_ABOUT_CONTENT: AboutPageContent = {
   contact: {
     title: 'Get in touch',
   },
+}
+
+export const DEFAULT_NAVIGATION_CONTENT: NavigationContent = {
+  logoSrc: '/logo-dark.png',
+  items: [
+    {
+      id: 'home',
+      label: 'Home',
+      href: '/',
+      enabled: true,
+      accent: false,
+      categorySlugs: [],
+    },
+    {
+      id: 'shop',
+      label: 'Shop',
+      href: '/shop',
+      enabled: true,
+      accent: false,
+      categorySlugs: [],
+    },
+    {
+      id: 'shoes',
+      label: 'Shoes',
+      href: '/shop?department=shoes',
+      enabled: true,
+      accent: false,
+      categorySlugs: [],
+    },
+    {
+      id: 'bags',
+      label: 'Bags',
+      href: '/shop?department=bags',
+      enabled: true,
+      accent: false,
+      categorySlugs: [],
+    },
+    {
+      id: 'accessories',
+      label: 'Accessories',
+      href: '/shop?department=accessories',
+      enabled: true,
+      accent: false,
+      categorySlugs: [],
+    },
+    {
+      id: 'about',
+      label: 'About',
+      href: '/about',
+      enabled: true,
+      accent: false,
+      categorySlugs: [],
+    },
+    {
+      id: 'sale',
+      label: 'Sale',
+      href: '/shop?sale=1',
+      enabled: true,
+      accent: true,
+      categorySlugs: [],
+    },
+  ],
 }
 
 export const DEFAULT_SITE_CONTENT: SiteContent = {

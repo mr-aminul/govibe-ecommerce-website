@@ -23,7 +23,12 @@ import {
   SITE_VIDEO_MAX_BYTES,
   type SitePageKey,
 } from '@/lib/website/constants'
-import { mergeAboutContent, mergeHomeContent, mergeSiteContent } from '@/lib/website/merge'
+import {
+  mergeAboutContent,
+  mergeHomeContent,
+  mergeNavigationContent,
+  mergeSiteContent,
+} from '@/lib/website/merge'
 import {
   SITE_PAGES_TAG,
   sitePageCacheTag,
@@ -31,6 +36,7 @@ import {
 import type {
   AboutPageContent,
   HomePageContent,
+  NavigationContent,
   SiteContent,
 } from '@/lib/website/types'
 
@@ -68,6 +74,12 @@ function revalidateSitePage(pageKey: SitePageKey) {
     revalidatePath('/admin/website/popup')
     revalidateTag(CAMPAIGNS_ANNOUNCEMENT_TAG)
     purgePrerenderArtifacts(['index', 'about', 'terms', 'privacy'])
+  }
+  if (pageKey === 'navigation') {
+    revalidatePath('/', 'layout')
+    revalidatePath('/shop')
+    revalidatePath('/admin/website/navigation')
+    purgePrerenderArtifacts(['index', 'shop'])
   }
 }
 
@@ -140,6 +152,33 @@ export async function saveSiteContent(
   }
 
   revalidateSitePage('site')
+  return { ok: true }
+}
+
+export async function saveNavigationContent(
+  content: NavigationContent,
+): Promise<ActionResult> {
+  const session = await requireRole(['admin', 'manager'])
+  const db = await createClient()
+  const merged = mergeNavigationContent(content)
+
+  const { error } = await db.from('site_pages').upsert(
+    {
+      page_key: 'navigation',
+      content: merged as unknown as Json,
+      updated_by: session.profile.id,
+    },
+    { onConflict: 'page_key' },
+  )
+
+  if (error) {
+    return {
+      ok: false,
+      error: error.message || 'Could not save navigation.',
+    }
+  }
+
+  revalidateSitePage('navigation')
   return { ok: true }
 }
 

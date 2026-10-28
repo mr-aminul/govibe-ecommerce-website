@@ -1,5 +1,12 @@
 import Link from 'next/link'
-import { ArrowRight, FileText, Home, ImageIcon, Settings2 } from 'lucide-react'
+import {
+  ArrowRight,
+  FileText,
+  Home,
+  ImageIcon,
+  Menu,
+  Settings2,
+} from 'lucide-react'
 import { AdminPageHeader } from '@/components/admin/ui'
 
 const pages = [
@@ -20,6 +27,15 @@ const pages = [
       'About hero media, story copy, stats, size-guide headings, and contact section title.',
     icon: FileText,
     preview: '/about',
+  },
+  {
+    key: 'navigation',
+    href: '/admin/website/navigation',
+    title: 'Menu',
+    description:
+      'Reorder the top menu, rename items, hide what you don’t need, and put categories under Shoes, Bags, or Accessories.',
+    icon: Menu,
+    preview: '/',
   },
   {
     key: 'popup',

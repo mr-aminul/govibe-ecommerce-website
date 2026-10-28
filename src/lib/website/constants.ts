@@ -28,6 +28,11 @@ export const SITE_ALLOWED_IMAGE_TYPES = [
 
 export const SITE_ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm'] as const
 
-export type SitePageKey = 'home' | 'about' | 'site'
+export type SitePageKey = 'home' | 'about' | 'site' | 'navigation'
 
-export const SITE_PAGE_KEYS: SitePageKey[] = ['home', 'about', 'site']
+export const SITE_PAGE_KEYS: SitePageKey[] = [
+  'home',
+  'about',
+  'site',
+  'navigation',
+]

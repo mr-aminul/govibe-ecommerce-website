@@ -1,37 +1,37 @@
-# Viable Footwear — Requirements & Task Breakdown
+# GoVibe — Requirements & Task Breakdown
 
 **Status:** Phase 5 complete — motion system + storefront polish; cross-cutting / launch checklist remain  
-**Last updated:** 2026-09-14  
-**Current codebase:** Next.js App Router storefront (DB catalog) + Admin CMS + COD/bKash/Nagad checkout/Pathao + sales/logistics analytics + GTM/Pixel/OMS webhooks + motion polish + production on Vercel (`viable.inventivelab.bd`).
+**Last updated:** 2026-10-28  
+**Current codebase:** Next.js App Router storefront (DB catalog) + Admin CMS + COD/bKash/Nagad checkout/Pathao + sales/logistics analytics + GTM/Pixel/OMS webhooks + motion polish + production on VPS (`govibe.inventivelab.bd`).
 
-**Secrets approach (4.4):** Payment/Pathao/OMS credentials live in `integration_settings` (Admin UI) with optional Vercel env fallback. Views expose only non-secret flags (`hasApiKey`, etc.). Marketing IDs are Admin-configured and injected server-side on the storefront only.
+**Secrets approach (4.4):** Payment/Pathao/OMS credentials live in `integration_settings` (Admin UI) with optional env fallback. Views expose only non-secret flags (`hasApiKey`, etc.). Marketing IDs are Admin-configured and injected server-side on the storefront only.
 
 ---
 
 ## 1. Product goal
 
-Ship a Bangladesh-ready ecommerce site for Viable Footwear where customers can browse, pay (bKash / Nagad / COD), and get Pathao-priced delivery; and where Admin/Manager run catalog, orders, logistics, campaigns, and integrations from a web dashboard.
+Ship a Bangladesh-ready ecommerce site for GoVibe (men’s bags) where customers can browse, pay (bKash / Nagad / COD), and get Pathao-priced delivery; and where Admin/Manager run catalog, orders, logistics, campaigns, and integrations from a web dashboard.
 
 ---
 
-## 2. Locked stack (free-tier)
+## 2. Locked stack
 
 | Layer | Choice |
 |--------|--------|
 | Repo | GitHub |
-| Host | Vercel (Hobby) ← deploy from GitHub |
-| Domain | Existing purchased domain → Vercel DNS |
-| App | Next.js (App Router) + TypeScript + Tailwind (reuse current design tokens) |
-| DB | Supabase Postgres (free) |
-| Auth | Supabase Auth + role claims / `profiles` |
-| Media | Supabase Storage (free) — product images + video |
-| Motion | Framer Motion (extend existing) |
-| Charts | Recharts (or similar OSS) |
-| Marketing tags | GTM + GA4 + Meta Pixel (free; Admin-configured) |
+| Host | VPS (Caddy + systemd Next.js) |
+| Domain | `govibe.inventivelab.bd` |
+| App | Next.js (App Router) + TypeScript + Tailwind |
+| DB / API | VPS Postgres + PostgREST (`/govibe-rest`) |
+| Auth | App-owned staff sessions + `profiles` roles |
+| Media | MinIO (`govibe-*` buckets on `s3.storage.inventivelab.bd`) |
+| Motion | Framer Motion |
+| Charts | Recharts |
+| Marketing tags | GTM + GA4 + Meta Pixel (Admin-configured) |
 | Payments | bKash PGW + Nagad merchant APIs (transaction fees only) |
 | Shipping | Pathao Merchant API |
 
-**Secrets:** Vercel env vars + Admin-only Integration settings. Never expose service role, payment, or Pathao keys to the client.
+**Secrets:** VPS env + Admin-only Integration settings. Never expose service keys, payment, or Pathao keys to the client.
 
 ---
 
@@ -59,7 +59,7 @@ All mutating APIs enforce role server-side (RLS + service checks). UI hiding is 
 ### 4.1 Catalog & media
 - CRUD products and categories.
 - Fields: name, slug, description (rich text or markdown), price, compare-at, category, sizes/colors/stock, active flag.
-- Multi-image gallery + optional product video (upload to Supabase Storage).
+- Multi-image gallery + optional product video (upload to MinIO).
 - SEO fields per product/category/page: title, meta description, OG image.
 
 ### 4.2 Related products
@@ -120,11 +120,11 @@ All mutating APIs enforce role server-side (RLS + service checks). UI hiding is 
 
 ## 5. Non-functional
 
-- Free-tier only for infra (Vercel + Supabase + OSS).
+- Self-hosted infra (VPS Postgres/PostgREST + MinIO + OSS).
 - Mobile-first storefront; usable admin on desktop.
 - Server-side validation on all money, stock, and role boundaries.
 - Audit-friendly: who changed product price / integration settings (Admin actions logged if cheap to add).
-- Compress/limit video length to stay within Supabase Storage free quota.
+- Compress/limit video length to stay within media storage quotas.
 
 ---
 
@@ -168,27 +168,27 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 
 ### Phase 0 — Platform foundation
 
-**Goal:** Next.js + Supabase + Auth + deploy path + empty Admin shell.
+**Goal:** Next.js + PostgREST Postgres + Auth + VPS deploy path + empty Admin shell.
 
 #### 0.1 Project migration
 - [x] Scaffold Next.js App Router (TS) in repo (replace or wrap Vite app).
 - [x] Port Tailwind theme tokens from `src/index.css`.
 - [x] Port public routes: Home, Shop, Product, Cart, About (static data OK temporarily).
 - [x] Port Framer Motion usage without breaking reduced-motion.
-- [x] Configure `vercel.json` / Next defaults; remove SPA-only rewrite if obsolete.
-- [x] Connect GitHub repo → Vercel project; preview deploys on PR.
-- [x] Attach custom domain on Vercel; HTTPS verify.
+- [x] Configure Next defaults; remove SPA-only rewrite if obsolete.
+- [x] Deploy to VPS (Caddy + systemd); HTTPS verify.
+- [x] Attach custom domain; HTTPS verify.
 
-#### 0.2 Supabase project
-- [x] Create Supabase project (free).
-- [x] Add env to local `.env` / `.env.local` (Vercel still pending): URL, anon, service role, DATABASE_URL.
+#### 0.2 Database & media
+- [x] Provision VPS Postgres + PostgREST (`/govibe-rest`).
+- [x] Add env to local `.env` / `.env.local`: `GOVIBE_API_URL`, `GOVIBE_SERVICE_KEY`, `AUTH_SECRET`, media S3 keys.
 - [x] SQL migrations for core tables (profiles, categories, products, media, variants).
-- [x] Enable RLS; policies for public read of active catalog; write = authenticated staff.
-- [x] Create Storage buckets: `product-images`, `product-videos` (public read for published assets; write = staff).
+- [x] App-owned auth; staff write via service key + role checks.
+- [x] Create MinIO buckets: `govibe-product-images`, `govibe-product-videos`, `govibe-site-media`.
 - [x] Seed Admin user; document how to promote Manager.
 
 #### 0.3 Auth & roles
-- [x] Supabase Auth email/password (or magic link) for staff only.
+- [x] Staff email/password sessions for Admin/Manager only.
 - [x] `profiles.role` = `admin` | `manager`; sync on signup/invite.
 - [x] Middleware protect `/admin/**`.
 - [x] Helper `requireRole('admin' | 'manager')` for server actions/API.
@@ -199,7 +199,7 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 - [x] Integrations nav visible to Admin only.
 - [x] Empty dashboard home with placeholders for Sales / Logistics KPIs.
 
-**Phase 0 done when:** Domain serves Next app from Vercel; Admin can log in; Manager cannot open Integrations; catalog still readable on storefront.
+**Phase 0 done when:** Domain serves Next app from VPS; Admin can log in; Manager cannot open Integrations; catalog still readable on storefront.
 
 ---
 
@@ -220,7 +220,7 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 - [x] Soft-deactivate instead of hard delete if orders reference product.
 
 #### 1.3 Media
-- [x] Upload multiple images → Supabase Storage; reorder; set primary; alt text.
+- [x] Upload multiple images → MinIO; reorder; set primary; alt text.
 - [x] Upload one optional video; size/type limits documented.
 - [x] PDP gallery uses ordered media; video player if present.
 - [x] Delete removes DB row + storage object.
@@ -348,7 +348,7 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 
 #### 4.4 Integration settings security
 - [x] Admin-only routes/UI.
-- [x] Secrets stored encrypted or in Vercel env with Admin “configured” flags—pick one approach and document.
+- [x] Secrets stored in VPS env / Admin Integration settings with “configured” flags—documented.
 - [x] Never return raw secrets to Manager or client bundles.
 
 **Phase 4 done when:** Admin can turn on GTM/Pixel without deploy; purchase events fire; outbound webhook delivers test payload.
@@ -379,8 +379,8 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 ## 9. Cross-cutting tasks (all phases)
 
 - [ ] `.env.example` documented for every secret.
-- [ ] README: local setup (Node, Supabase CLI optional, Vercel link).
-- [ ] Error monitoring light-touch (Vercel logs enough for v1).
+- [ ] README: local setup (Node, PostgREST env, VPS deploy).
+- [ ] Error monitoring light-touch (VPS / app logs enough for v1).
 - [ ] Rate-limit payment create + Pathao quote endpoints (basic).
 - [ ] BD phone + address validation helpers.
 - [ ] Currency formatting ৳ throughout.
@@ -390,7 +390,7 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 
 ## 10. Acceptance checklist (launch)
 
-- [ ] Domain on Vercel serves production Next app.
+- [ ] Domain on VPS serves production Next app.
 - [ ] Admin and Manager login; permissions match §3.
 - [ ] Catalog CRUD + media + related products work end-to-end.
 - [ ] SEO: unique product title/description; sitemap returns product URLs.
@@ -410,7 +410,7 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 
 | Item | Owner | Needed by |
 |------|--------|-----------|
-| Supabase project + Vercel team access | Eng | Phase 0 |
+| VPS Postgres/PostgREST + deploy access | Eng | Phase 0 |
 | Domain DNS access | Ops | Phase 0 |
 | Pathao merchant + API access | Ops | Phase 2 |
 | bKash merchant + sandbox/prod apps | Ops | Phase 2 |
@@ -425,7 +425,7 @@ Legend: `[ ]` todo · Owner hints: Eng / Design / Ops / Content
 
 | Must-have | Phase |
 |-----------|-------|
-| Stack: GitHub → Vercel → domain + Supabase DB/Storage | 0 |
+| Stack: GitHub → VPS → domain + Postgres/PostgREST + MinIO | 0 |
 | Admin vs Manager accounts | 0–1 |
 | Product/category/price/image/video/description CRUD | 1 |
 | Customizable You May Also Like | 1 |

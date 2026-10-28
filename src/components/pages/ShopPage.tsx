@@ -5,27 +5,70 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { Search } from 'lucide-react'
 import type { CategoryView, Product } from '@/lib/catalog/types'
 import {
+  departmentCategorySlugs,
+  findDepartmentLabel,
+} from '@/lib/catalog/nav'
+import {
   expandProductsByColorway,
   productColorways,
 } from '@/lib/catalog/product-colorways'
 import { ProductCard } from '@/components/ProductCard'
+import type { NavigationContent } from '@/lib/website/types'
 
 export function ShopPage({
   products,
   categories,
+  navigation,
 }: {
   products: Product[]
   categories: CategoryView[]
+  navigation: NavigationContent
 }) {
   const router = useRouter()
   const params = useSearchParams()
   const category = params.get('category') ?? 'all'
+  const departmentParam = params.get('department')
+  const departmentActive = Boolean(
+    departmentParam &&
+      navigation.items.some(
+        (item) => item.id === departmentParam && item.enabled,
+      ),
+  )
+  const departmentSlugsList = useMemo(() => {
+    if (!departmentActive || !departmentParam) return []
+    return departmentCategorySlugs(navigation, categories, departmentParam)
+  }, [departmentActive, departmentParam, navigation, categories])
   const saleOnly = params.get('sale') === '1'
   const queryParam = params.get('q') ?? ''
   const focusSearch = params.get('focus') === 'search'
   const [sort, setSort] = useState('featured')
   const [query, setQuery] = useState(queryParam)
   const searchRef = useRef<HTMLInputElement>(null)
+  const departmentSlugs = departmentActive
+    ? new Set(departmentSlugsList)
+    : null
+  const chipCategories = useMemo(() => {
+    if (!departmentActive || !departmentParam) return categories
+    const allowed = new Set(departmentSlugsList)
+    const bySlug = new Map(categories.map((c) => [c.slug, c]))
+    const ordered: CategoryView[] = []
+    for (const slug of departmentSlugsList) {
+      const cat = bySlug.get(slug)
+      if (cat) ordered.push(cat)
+    }
+    // Include any extras that somehow matched
+    for (const cat of categories) {
+      if (allowed.has(cat.slug) && !ordered.some((c) => c.slug === cat.slug)) {
+        ordered.push(cat)
+      }
+    }
+    return ordered
+  }, [
+    departmentActive,
+    departmentParam,
+    departmentSlugsList,
+    categories,
+  ])
 
   useEffect(() => {
     setQuery(queryParam)
@@ -37,10 +80,12 @@ export function ShopPage({
   }, [focusSearch])
 
   const filtered = useMemo(() => {
-    let list =
-      category === 'all'
-        ? products
-        : products.filter((p) => p.category === category)
+    let list = products
+    if (category !== 'all') {
+      list = list.filter((p) => p.category === category)
+    } else if (departmentSlugs) {
+      list = list.filter((p) => departmentSlugs.has(p.category))
+    }
     if (saleOnly) list = list.filter((p) => p.badge === 'Sale' || p.compareAt)
 
     let listings = expandProductsByColorway(list)
@@ -76,7 +121,7 @@ export function ShopPage({
       )
     }
     return listings
-  }, [category, saleOnly, sort, products, query])
+  }, [category, departmentSlugs, saleOnly, sort, products, query])
 
   const setParams = (next: URLSearchParams | Record<string, string>) => {
     const qs =
@@ -90,10 +135,15 @@ export function ShopPage({
     const next = new URLSearchParams(params.toString())
     next.delete('sale')
     next.delete('focus')
+    next.delete('department')
     if (id === 'all') next.delete('category')
     else next.set('category', id)
     setParams(next)
   }
+
+  const departmentLabel = departmentActive
+    ? findDepartmentLabel(navigation, departmentParam!)
+    : null
 
   const commitSearch = (value: string) => {
     const next = new URLSearchParams(params.toString())
@@ -108,12 +158,14 @@ export function ShopPage({
     <div className="mx-auto max-w-7xl px-4 py-10 md:px-6 md:py-14 lg:px-8">
       <div className="max-w-2xl">
         <h1 className="font-display text-4xl font-extrabold tracking-tight text-ink md:text-5xl">
-          {saleOnly ? 'Sale' : 'Shop'}
+          {saleOnly ? 'Sale' : departmentLabel ?? 'Shop'}
         </h1>
         <p className="mt-2 text-[15px] text-mute">
           {saleOnly
             ? 'Limited deals on backpacks, messengers & more.'
-            : 'Bags and everyday carries for every Dhaka day.'}
+            : departmentActive && departmentLabel
+              ? `Shop ${departmentLabel.toLowerCase()} from the GoVibe catalog.`
+              : 'Shoes, bags, and everyday carries for every Dhaka day.'}
         </p>
       </div>
 
@@ -142,13 +194,13 @@ export function ShopPage({
       <div className="mt-6 flex flex-col gap-4 border-b border-cloud pb-6 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <FilterChip
-            active={category === 'all' && !saleOnly}
+            active={category === 'all' && !saleOnly && !departmentActive}
             onClick={() => {
               setParams({})
             }}
             label="All"
           />
-          {categories.map((c) => (
+          {chipCategories.map((c) => (
             <FilterChip
               key={c.id}
               active={category === c.slug}

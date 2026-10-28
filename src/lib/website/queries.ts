@@ -5,11 +5,13 @@ import type { SitePageKey } from '@/lib/website/constants'
 import {
   mergeAboutContent,
   mergeHomeContent,
+  mergeNavigationContent,
   mergeSiteContent,
 } from '@/lib/website/merge'
 import type {
   AboutPageContent,
   HomePageContent,
+  NavigationContent,
   SiteContent,
 } from '@/lib/website/types'
 
@@ -55,6 +57,12 @@ const getSiteCached = unstable_cache(
   { tags: [SITE_PAGES_TAG, pageTag('site')], ...STORE_PAGE_CACHE },
 )
 
+const getNavigationCached = unstable_cache(
+  async () => mergeNavigationContent(await fetchPageRaw('navigation')),
+  ['site-page-navigation'],
+  { tags: [SITE_PAGES_TAG, pageTag('navigation')], ...STORE_PAGE_CACHE },
+)
+
 /** Storefront: cached home page content with defaults. */
 export const getHomePageContent = cache(
   async (): Promise<HomePageContent> => getHomeCached(),
@@ -70,6 +78,11 @@ export const getSiteContent = cache(
   async (): Promise<SiteContent> => getSiteCached(),
 )
 
+/** Storefront: header navigation structure. */
+export const getNavigationContent = cache(
+  async (): Promise<NavigationContent> => getNavigationCached(),
+)
+
 /** Admin editor: always fresh. */
 export async function getHomePageContentFresh(): Promise<HomePageContent> {
   return mergeHomeContent(await fetchPageRaw('home'))
@@ -81,6 +94,10 @@ export async function getAboutPageContentFresh(): Promise<AboutPageContent> {
 
 export async function getSiteContentFresh(): Promise<SiteContent> {
   return mergeSiteContent(await fetchPageRaw('site'))
+}
+
+export async function getNavigationContentFresh(): Promise<NavigationContent> {
+  return mergeNavigationContent(await fetchPageRaw('navigation'))
 }
 
 export function sitePageCacheTag(pageKey: SitePageKey) {
