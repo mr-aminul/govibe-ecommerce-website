@@ -1,5 +1,8 @@
-/** Cap for “You May Also Like” tiles on PDP. */
+/** Cap for manual “You May Also Like” tiles on PDP. */
 export const RELATED_PRODUCTS_DISPLAY_CAP = 8
+
+/** Soft cap for auto mode (bestsellers → rest of catalog). */
+export const RELATED_PRODUCTS_AUTO_CAP = 48
 
 /** Max optional product videos. */
 export const MAX_PRODUCT_VIDEOS = 1

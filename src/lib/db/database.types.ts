@@ -110,6 +110,8 @@ export interface Database {
           active: boolean
           requires_size: boolean
           related_product_ids: string[]
+          related_products_auto: boolean
+          size_chart_path: string | null
           seo_title: string | null
           seo_description: string | null
           created_at: string
@@ -135,6 +137,8 @@ export interface Database {
           active?: boolean
           requires_size?: boolean
           related_product_ids?: string[]
+          related_products_auto?: boolean
+          size_chart_path?: string | null
           seo_title?: string | null
           seo_description?: string | null
         }

@@ -2,8 +2,8 @@ import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { ProductPage } from '@/components/pages/ProductPage'
 import {
-  getRelatedProductIds,
   getRelatedProducts,
+  getRelatedProductsSettings,
   getStoreProductBySlug,
 } from '@/lib/catalog/queries'
 import { getSiteContent } from '@/lib/website/queries'
@@ -54,8 +54,10 @@ export default async function ProductRoute({ params }: Props) {
   ])
   if (!product) notFound()
 
-  const relatedIds = await getRelatedProductIds(product.id)
-  const related = await getRelatedProducts(product, relatedIds)
+  const relatedSettings = await getRelatedProductsSettings(product.id)
+  const related = await getRelatedProducts(product, relatedSettings.ids, {
+    auto: relatedSettings.auto,
+  })
 
   const jsonLd = {
     '@context': 'https://schema.org',
@@ -89,7 +91,11 @@ export default async function ProductRoute({ params }: Props) {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
-      <ProductPage product={product} related={related} />
+      <ProductPage
+        product={product}
+        related={related}
+        relatedAuto={relatedSettings.auto}
+      />
     </>
   )
 }

@@ -7,7 +7,10 @@ import {
   storeProductTag,
 } from '@/lib/catalog/cache-tags'
 import type { ProductBadge } from '@/lib/catalog/constants'
-import { RELATED_PRODUCTS_DISPLAY_CAP } from '@/lib/catalog/constants'
+import {
+  RELATED_PRODUCTS_AUTO_CAP,
+  RELATED_PRODUCTS_DISPLAY_CAP,
+} from '@/lib/catalog/constants'
 import { MEDIA_FALLBACK, resolveMediaUrl } from '@/lib/catalog/media-url'
 import { normalizeColorHex } from '@/lib/catalog/gallery'
 import type {
@@ -109,6 +112,9 @@ function mapProduct(
     note: row.note?.trim() || undefined,
     materials: row.materials?.trim() || undefined,
     careInfo: row.care_info?.trim() || undefined,
+    sizeChartUrl: row.size_chart_path
+      ? resolveMediaUrl(row.size_chart_path, 'image')
+      : undefined,
     featured: row.featured,
     weightKg: Number(row.weight_kg),
     seoTitle: row.seo_title ?? undefined,
@@ -228,7 +234,18 @@ export type AdminProductView = Product & {
   active: boolean
   categoryId: string | null
   relatedProductIds: string[]
+  relatedProductsAuto: boolean
 }
+
+/** Orders that count toward “most sold” for auto related products. */
+const RELATED_SALES_STATUSES = [
+  'paid',
+  'awaiting_fulfillment',
+  'packed',
+  'shipped',
+  'delivered',
+  'returned',
+] as const
 
 /**
  * Active products for shop / home (optionally filtered by category slug).
@@ -321,20 +338,26 @@ export const getStoreProductBySlug = cache(
 )
 
 /**
- * Related products: manual list first, else same category.
+ * Related products: auto (top sellers → rest) or manual list / same-category fallback.
  */
 export async function getRelatedProducts(
   product: Product,
   relatedIds: string[],
+  options?: { auto?: boolean },
 ): Promise<Product[]> {
   if (!isDbConfigured()) return []
 
+  const auto = Boolean(options?.auto)
   const orderedIds = relatedIds.filter((id) => id !== product.id)
   const idsKey = orderedIds.join(',')
 
   return unstable_cache(
     async (): Promise<Product[]> => {
       const db = createServiceClient()
+
+      if (auto) {
+        return loadAutoRelatedProducts(db, product.id)
+      }
 
       if (orderedIds.length > 0) {
         const { data } = await db
@@ -371,7 +394,7 @@ export async function getRelatedProducts(
 
       return loadProductBundles(data ?? [], { client: db })
     },
-    ['store-related', product.id, idsKey, product.category],
+    ['store-related', product.id, auto ? 'auto' : 'manual', idsKey, product.category],
     {
       revalidate: STORE_CACHE_REVALIDATE,
       tags: [STORE_CATALOG_TAG, storeProductTag(product.slug)],
@@ -380,28 +403,92 @@ export async function getRelatedProducts(
 }
 
 /**
- * Raw related IDs for a product (admin + PDP resolver).
+ * Most-sold first, then remaining active products (excludes current).
  */
-export const getRelatedProductIds = cache(
-  async (productId: string): Promise<string[]> => {
-    if (!isDbConfigured()) return []
+async function loadAutoRelatedProducts(
+  db: ReturnType<typeof createServiceClient>,
+  excludeId: string,
+): Promise<Product[]> {
+  const [{ data: rows }, { data: soldRows }] = await Promise.all([
+    db
+      .from('products')
+      .select('*')
+      .eq('active', true)
+      .neq('id', excludeId)
+      .order('featured', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(RELATED_PRODUCTS_AUTO_CAP),
+    db
+      .from('order_items')
+      .select('product_id, quantity, orders!inner(status)')
+      .not('product_id', 'is', null)
+      .neq('product_id', excludeId)
+      .in('orders.status', [...RELATED_SALES_STATUSES]),
+  ])
+
+  const soldByProduct = new Map<string, number>()
+  for (const row of soldRows ?? []) {
+    if (!row.product_id) continue
+    soldByProduct.set(
+      row.product_id,
+      (soldByProduct.get(row.product_id) ?? 0) + (row.quantity ?? 0),
+    )
+  }
+
+  const sorted = [...(rows ?? [])].sort((a, b) => {
+    const soldDiff = (soldByProduct.get(b.id) ?? 0) - (soldByProduct.get(a.id) ?? 0)
+    if (soldDiff !== 0) return soldDiff
+    if (a.featured !== b.featured) return a.featured ? -1 : 1
+    return (
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )
+  })
+
+  return loadProductBundles(sorted, { client: db })
+}
+
+export type RelatedProductsSettings = {
+  auto: boolean
+  ids: string[]
+}
+
+/**
+ * Related-products mode + manual IDs for a product (admin + PDP).
+ */
+export const getRelatedProductsSettings = cache(
+  async (productId: string): Promise<RelatedProductsSettings> => {
+    if (!isDbConfigured()) return { auto: false, ids: [] }
 
     return unstable_cache(
-      async (): Promise<string[]> => {
+      async (): Promise<RelatedProductsSettings> => {
         const db = createServiceClient()
         const { data } = await db
           .from('products')
-          .select('related_product_ids')
+          .select('related_product_ids, related_products_auto')
           .eq('id', productId)
           .maybeSingle()
-        return data?.related_product_ids ?? []
+        return {
+          auto: Boolean(data?.related_products_auto),
+          ids: data?.related_product_ids ?? [],
+        }
       },
-      ['store-related-ids', productId],
+      ['store-related-settings', productId],
       {
         revalidate: STORE_CACHE_REVALIDATE,
         tags: [STORE_CATALOG_TAG],
       },
     )()
+  },
+)
+
+/**
+ * Raw related IDs for a product (admin + PDP resolver).
+ * @deprecated Prefer getRelatedProductsSettings
+ */
+export const getRelatedProductIds = cache(
+  async (productId: string): Promise<string[]> => {
+    const settings = await getRelatedProductsSettings(productId)
+    return settings.ids
   },
 )
 
@@ -649,7 +736,7 @@ export function getCatalogCounts() {
 }
 
 const ADMIN_PRODUCT_DETAIL_SELECT =
-  'id, name, slug, description, subtitle, note, materials, care_info, price, compare_at, weight_kg, category_id, badge, featured, active, seo_title, seo_description, related_product_ids' as const
+  'id, name, slug, description, subtitle, note, materials, care_info, price, compare_at, weight_kg, category_id, badge, featured, active, seo_title, seo_description, related_product_ids, related_products_auto' as const
 
 /**
  * Cached product core row for the admin edit page.
@@ -827,6 +914,7 @@ export function listAdminProductViews(filters: AdminProductListFilters) {
             active: row.active,
             categoryId: row.category_id,
             relatedProductIds: row.related_product_ids ?? [],
+            relatedProductsAuto: Boolean(row.related_products_auto),
           }
         }),
         total: count ?? 0,
@@ -863,6 +951,7 @@ export function getAdminProductView(id: string) {
         active: data.active,
         categoryId: data.category_id,
         relatedProductIds: data.related_product_ids ?? [],
+        relatedProductsAuto: Boolean(data.related_products_auto),
       }
     },
     [`admin-product-view-${id}`],
@@ -896,6 +985,7 @@ export function getAdminProductViewBySlug(slug: string) {
         active: data.active,
         categoryId: data.category_id,
         relatedProductIds: data.related_product_ids ?? [],
+        relatedProductsAuto: Boolean(data.related_products_auto),
       }
     },
     [`admin-product-view-slug-${slug}`],

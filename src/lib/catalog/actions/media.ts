@@ -15,6 +15,7 @@ import {
 } from '@/lib/catalog/constants'
 import { colorwayKey } from '@/lib/catalog/colorway'
 import { extractDominantColor } from '@/lib/catalog/extract-dominant-color'
+import { resolveMediaUrl } from '@/lib/catalog/media-url'
 import { optimizeProductImage } from '@/lib/catalog/optimize-image'
 import type { ActionResult } from '@/lib/catalog/types'
 import {
@@ -463,6 +464,141 @@ export async function clearColorwayMedia(
       .update({ color: null })
       .in('id', ids)
     if (error) return { ok: false, error: error.message }
+  }
+
+  revalidateProduct(productId, product.slug)
+  return { ok: true }
+}
+
+const SIZE_CHART_IMAGE_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+] as const
+
+/**
+ * Upload or replace the product size chart image (stored on products.size_chart_path).
+ */
+export async function uploadProductSizeChart(
+  productId: string,
+  formData: FormData,
+): Promise<ActionResult<{ url: string }>> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const file = formData.get('file')
+  if (!(file instanceof File) || file.size === 0) {
+    return { ok: false, error: 'Choose a JPEG image to upload.' }
+  }
+
+  if (!(SIZE_CHART_IMAGE_TYPES as readonly string[]).includes(file.type)) {
+    return { ok: false, error: 'Size chart must be a JPEG, PNG, or WebP image.' }
+  }
+  if (file.size > IMAGE_MAX_BYTES) {
+    return { ok: false, error: 'Image must be 20MB or smaller.' }
+  }
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug, size_chart_path')
+    .eq('id', productId)
+    .maybeSingle()
+  if (!product) return { ok: false, error: 'Product not found.' }
+
+  if (!isObjectStoreConfigured()) {
+    return { ok: false, error: 'Media storage is not configured.' }
+  }
+
+  const originalBytes = Buffer.from(await file.arrayBuffer())
+  let uploadBody: Buffer = originalBytes
+  let contentType = file.type
+  let ext = extensionFor(file.type)
+
+  try {
+    const optimized = await optimizeProductImage(originalBytes, file.type, {
+      square: false,
+    })
+    if (optimized) {
+      uploadBody = optimized.buffer
+      contentType = optimized.contentType
+      ext = optimized.extension
+    }
+  } catch {
+    // Fall back to the original file if decode/encode fails.
+  }
+
+  const storagePath = `${productId}/size-chart/${crypto.randomUUID()}.${ext}`
+  const uploaded = await uploadObject({
+    bucket: PRODUCT_IMAGE_BUCKET,
+    path: storagePath,
+    body: uploadBody,
+    contentType,
+  })
+  if (!uploaded.ok) return { ok: false, error: uploaded.error }
+
+  await uploadImageWidthVariants({
+    bucket: PRODUCT_IMAGE_BUCKET,
+    objectPath: storagePath,
+    bytes: uploadBody,
+  })
+
+  const { error } = await db
+    .from('products')
+    .update({ size_chart_path: storagePath })
+    .eq('id', productId)
+
+  if (error) {
+    await deleteImageWithVariants(PRODUCT_IMAGE_BUCKET, storagePath)
+    return { ok: false, error: error.message }
+  }
+
+  const previous = product.size_chart_path?.trim()
+  if (
+    previous &&
+    previous !== storagePath &&
+    !previous.startsWith('/') &&
+    !previous.startsWith('http')
+  ) {
+    await deleteImageWithVariants(PRODUCT_IMAGE_BUCKET, previous)
+  }
+
+  revalidateProduct(productId, product.slug)
+  return {
+    ok: true,
+    data: { url: resolveMediaUrl(storagePath, 'image') },
+  }
+}
+
+/**
+ * Remove the product size chart image.
+ */
+export async function clearProductSizeChart(
+  productId: string,
+): Promise<ActionResult> {
+  await requireRole(['admin', 'manager'])
+  const db = await createClient()
+
+  const { data: product } = await db
+    .from('products')
+    .select('slug, size_chart_path')
+    .eq('id', productId)
+    .maybeSingle()
+  if (!product) return { ok: false, error: 'Product not found.' }
+
+  const previous = product.size_chart_path?.trim()
+  const { error } = await db
+    .from('products')
+    .update({ size_chart_path: null })
+    .eq('id', productId)
+
+  if (error) return { ok: false, error: error.message }
+
+  if (
+    previous &&
+    !previous.startsWith('/') &&
+    !previous.startsWith('http')
+  ) {
+    await deleteImageWithVariants(PRODUCT_IMAGE_BUCKET, previous)
   }
 
   revalidateProduct(productId, product.slug)

@@ -28,7 +28,7 @@ import { useSiteSettings } from '@/context/SiteSettingsContext'
 import { ProductAccordion } from '@/components/ProductAccordion'
 import { ProductCard } from '@/components/ProductCard'
 import { ProductImageZoom } from '@/components/ProductImageZoom'
-import { SizeGuideDrawer } from '@/components/SizeGuideDrawer'
+import { SizeChartModal } from '@/components/SizeChartModal'
 import { SizeOptionButton } from '@/components/SizeOptionButton'
 import { trackAddToCart, trackViewItem } from '@/lib/analytics/events'
 
@@ -37,9 +37,12 @@ type SizeUnit = 'EU' | 'UK'
 export function ProductPage({
   product,
   related,
+  relatedAuto = false,
 }: {
   product: Product
   related: Product[]
+  /** Auto mode: horizontal strip of top sellers then the rest. */
+  relatedAuto?: boolean
 }) {
   const { addToCart, startBuyNow, toggleWishlist, isWishlisted } = useCart()
   const { productPromises } = useSiteSettings()
@@ -51,7 +54,7 @@ export function ProductPage({
   const [imageIndex, setImageIndex] = useState(0)
   const [added, setAdded] = useState(false)
   const [error, setError] = useState('')
-  const [sizeGuideOpen, setSizeGuideOpen] = useState(false)
+  const [sizeChartOpen, setSizeChartOpen] = useState(false)
 
   const colorOptions = useMemo(() => productColorways(product), [product])
 
@@ -479,13 +482,15 @@ export function ProductPage({
                   </span>
                 </p>
                 <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setSizeGuideOpen(true)}
-                    className="text-[12px] font-medium text-navy underline-offset-2 hover:underline"
-                  >
-                    Size guide
-                  </button>
+                  {product.sizeChartUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => setSizeChartOpen(true)}
+                      className="text-[12px] font-medium text-navy underline-offset-2 hover:underline"
+                    >
+                      Size chart
+                    </button>
+                  ) : null}
                   {showSizePicker ? (
                     <div
                       role="group"
@@ -641,18 +646,34 @@ export function ProductPage({
           <h2 className="font-display text-3xl font-extrabold tracking-tight">
             You may also like
           </h2>
-          <div className="mt-8 grid grid-cols-2 gap-x-4 gap-y-10 sm:grid-cols-4">
-            {related.map((p, i) => (
-              <ProductCard key={p.id} product={p} index={i} />
-            ))}
-          </div>
+          {relatedAuto ? (
+            <div className="mt-8 flex gap-4 overflow-x-auto pb-2 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {related.map((p, i) => (
+                <div
+                  key={p.id}
+                  className="w-[min(44vw,11.5rem)] shrink-0 sm:w-44"
+                >
+                  <ProductCard product={p} index={i} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-8 grid grid-cols-2 gap-x-4 gap-y-10 sm:grid-cols-4">
+              {related.map((p, i) => (
+                <ProductCard key={p.id} product={p} index={i} />
+              ))}
+            </div>
+          )}
         </section>
       )}
 
-      <SizeGuideDrawer
-        open={sizeGuideOpen}
-        onClose={() => setSizeGuideOpen(false)}
-      />
+      {product.sizeChartUrl ? (
+        <SizeChartModal
+          open={sizeChartOpen}
+          onClose={() => setSizeChartOpen(false)}
+          imageUrl={product.sizeChartUrl}
+        />
+      ) : null}
     </div>
   )
 }

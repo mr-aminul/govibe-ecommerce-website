@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { ArrowLeft, Heart, Info, RotateCcw, Star, Truck } from 'lucide-react'
+import { SizeChartModal } from '@/components/SizeChartModal'
 import { SizeOptionButton } from '@/components/SizeOptionButton'
 import {
   saveProductVariants,
@@ -119,9 +120,16 @@ export function AdminProductEditor({
     product.requiresSize !== false,
   )
   const [relatedIds, setRelatedIds] = useState<string[]>(initialRelatedIds)
+  const [relatedAuto, setRelatedAuto] = useState(
+    Boolean(product.relatedProductsAuto),
+  )
 
   const [size, setSize] = useState<number | null>(null)
   const [colorIndex, setColorIndex] = useState<number | null>(0)
+  const [sizeChartOpen, setSizeChartOpen] = useState(false)
+  const [sizeChartUrl, setSizeChartUrl] = useState<string | null>(
+    product.sizeChartUrl ?? null,
+  )
 
   const draft = useMemo(
     () => ({
@@ -144,6 +152,7 @@ export function AdminProductEditor({
       requiresSize,
       variantRows,
       relatedIds,
+      relatedAuto,
     }),
     [
       name,
@@ -165,6 +174,7 @@ export function AdminProductEditor({
       requiresSize,
       variantRows,
       relatedIds,
+      relatedAuto,
     ],
   )
   const [savedSnapshot, setSavedSnapshot] = useState(() =>
@@ -316,6 +326,7 @@ export function AdminProductEditor({
 
     const relatedData = new FormData()
     relatedData.set('related_ids_json', JSON.stringify(relatedIds))
+    relatedData.set('related_auto', relatedAuto ? 'true' : 'false')
 
     const variantsResult = await saveProductVariants(product.id, variantsData)
     if (!variantsResult.ok) {
@@ -632,7 +643,16 @@ export function AdminProductEditor({
           <div className="mt-7">
             {requiresSize ? (
               <>
-                <p className="text-[13px] font-semibold text-ink">Size (EU)</p>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[13px] font-semibold text-ink">Size (EU)</p>
+                  <button
+                    type="button"
+                    onClick={() => setSizeChartOpen(true)}
+                    className="text-[12px] font-medium text-navy underline-offset-2 hover:underline"
+                  >
+                    Size chart
+                  </button>
+                </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {(sizesForColor.length > 0 ? sizesForColor : product.sizes)
                     .filter((s) => s > 0)
@@ -821,17 +841,69 @@ export function AdminProductEditor({
       </section>
 
       <section className="mt-20 border-t border-cloud pt-14">
-        <h2 className="font-display text-3xl font-extrabold tracking-tight">
-          You may also like
-        </h2>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-display text-3xl font-extrabold tracking-tight">
+              You may also like
+            </h2>
+            <p className="mt-1 text-[13px] text-mute">
+              {relatedAuto
+                ? 'Auto shows top sellers first, then the rest of the catalog in a scroll.'
+                : 'Pick products manually, or turn on Auto to fill this section for you.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={relatedAuto}
+            aria-label="Auto product suggestions"
+            onClick={() => setRelatedAuto((prev) => !prev)}
+            className={[
+              'inline-flex items-center gap-2.5 rounded-full border bg-white px-3 py-2 text-[12px] font-medium',
+              relatedAuto ? 'border-navy text-ink' : 'border-cloud text-ink',
+            ].join(' ')}
+          >
+            <span className={relatedAuto ? 'text-navy' : 'text-mute'}>
+              Auto suggest
+            </span>
+            <span
+              className={[
+                'relative h-5 w-9 shrink-0 rounded-full transition-colors duration-200',
+                relatedAuto ? 'bg-navy' : 'bg-cloud',
+              ].join(' ')}
+            >
+              <span
+                className={[
+                  'absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200',
+                  relatedAuto ? 'translate-x-4' : 'translate-x-0',
+                ].join(' ')}
+              />
+            </span>
+          </button>
+        </div>
         <div className="mt-6">
-          <RelatedProductsPicker
-            catalog={relatedCatalog}
-            selectedIds={relatedIds}
-            onChange={setRelatedIds}
-          />
+          {relatedAuto ? (
+            <p className="rounded-xl border border-cloud bg-mist/40 px-4 py-3 text-[13px] text-mute">
+              Manual picks are paused while Auto is on. Your previous selections
+              stay saved and come back when you turn Auto off.
+            </p>
+          ) : (
+            <RelatedProductsPicker
+              catalog={relatedCatalog}
+              selectedIds={relatedIds}
+              onChange={setRelatedIds}
+            />
+          )}
         </div>
       </section>
+
+      <SizeChartModal
+        open={sizeChartOpen}
+        onClose={() => setSizeChartOpen(false)}
+        imageUrl={sizeChartUrl}
+        productId={product.id}
+        onImageChange={setSizeChartUrl}
+      />
     </div>
   )
 }

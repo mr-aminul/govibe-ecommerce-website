@@ -1197,7 +1197,7 @@ export async function searchRelatedProductOptions(
 }
 
 /**
- * Persist ordered related product IDs (excludes self, capped).
+ * Persist related mode + ordered IDs (excludes self, capped when manual).
  */
 export async function saveRelatedProducts(
   productId: string,
@@ -1205,6 +1205,8 @@ export async function saveRelatedProducts(
 ): Promise<ActionResult> {
   await requireRole(['admin', 'manager'])
   const db = await createClient()
+
+  const auto = readString(formData, 'related_auto') === 'true'
 
   let ids: string[] = []
   try {
@@ -1222,7 +1224,10 @@ export async function saveRelatedProducts(
 
   const { data: product, error } = await db
     .from('products')
-    .update({ related_product_ids: ids })
+    .update({
+      related_products_auto: auto,
+      related_product_ids: ids,
+    })
     .eq('id', productId)
     .select('slug')
     .single()

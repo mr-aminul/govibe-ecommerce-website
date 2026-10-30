@@ -39,6 +39,8 @@ export type Product = {
   materials?: string
   /** Care / manufacturer accordion body. */
   careInfo?: string
+  /** Resolved URL for the size chart image modal (null/undefined = none). */
+  sizeChartUrl?: string
   featured?: boolean
   weightKg: number
   seoTitle?: string
