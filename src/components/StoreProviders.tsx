@@ -41,7 +41,7 @@ export function StoreProviders({
           <main className="flex-1">
             <PageTransition>{children}</PageTransition>
           </main>
-          <Footer />
+          <Footer logoSrc={navigation.logoSrc} />
           <WhatsAppBubble />
           <MarketingPopup />
           <VisitorBeacon />

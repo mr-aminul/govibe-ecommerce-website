@@ -1,5 +1,6 @@
 import { unstable_cache } from 'next/cache'
 import { createServiceClient } from '@/lib/db/admin'
+import { isRpcFallbackError } from '@/lib/db/postgrest'
 import { pathaoStatusLabel } from '@/lib/orders/status-labels'
 import { pathaoTrackingUrl } from '@/lib/orders/pathao-tracking'
 import type { OrderStatus, PaymentMethod } from '@/lib/db/database.types'
@@ -155,17 +156,6 @@ const BUCKET_META: { key: LogisticsBucketKey; label: string }[] = [
   { key: 'stranded', label: 'Stranded on Pathao' },
 ]
 
-function isMissingRpcError(error: { code?: string; message?: string } | null) {
-  if (!error) return false
-  return (
-    error.code === 'PGRST202' ||
-    error.code === '42883' ||
-    /could not find the function|function .* does not exist/i.test(
-      error.message ?? '',
-    )
-  )
-}
-
 function mapRpcPayload(payload: LogisticsRpcPayload): LogisticsAnalytics {
   const counts = payload.bucketCounts ?? {}
   return {
@@ -202,11 +192,13 @@ function mapRpcPayload(payload: LogisticsRpcPayload): LogisticsAnalytics {
 
 async function fetchLogisticsViaRpc(): Promise<LogisticsAnalytics | null> {
   const db = createServiceClient()
-  const { data, error } = await db.rpc('admin_logistics_analytics')
+  const { data, error, status } = await db.rpc('admin_logistics_analytics')
 
   if (error) {
-    if (isMissingRpcError(error)) return null
-    console.error('[logistics] rpc', error)
+    if (isRpcFallbackError(error, status)) return null
+    console.warn(
+      `[logistics] rpc failed (${status}): ${error.message}${error.code ? ` [${error.code}]` : ''}`,
+    )
     return null
   }
 

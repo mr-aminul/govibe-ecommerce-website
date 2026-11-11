@@ -82,8 +82,11 @@ export async function govibeFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   const agent = getGovibeHttpsAgent()
+  const parsedEarly = new URL(url)
 
-  if (!agent) {
+  // Custom https.Agent path is HTTPS-only. Plain HTTP (e.g. 127.0.0.1 PostgREST)
+  // must use undici/native fetch.
+  if (!agent || parsedEarly.protocol === 'http:') {
     try {
       return await fetch(url, init)
     } catch (err) {
@@ -93,7 +96,7 @@ export async function govibeFetch(
 
   return new Promise<Response>((resolve, reject) => {
     try {
-      const parsed = new URL(url)
+      const parsed = parsedEarly
       const method = (init.method || 'GET').toUpperCase()
       const headerBag = new Headers(init.headers)
       const headers: Record<string, string> = {}

@@ -4,7 +4,11 @@ import { randomUUID } from 'crypto'
 import { revalidatePath, revalidateTag } from 'next/cache'
 import { requireRole } from '@/lib/auth/session'
 import { CAMPAIGNS_ANNOUNCEMENT_TAG } from '@/lib/campaigns/queries'
-import { purgePrerenderArtifacts } from '@/lib/catalog/cache-tags'
+import {
+  purgeFetchCacheByTags,
+  purgePrerenderArtifacts,
+  purgeStorefrontPrerender,
+} from '@/lib/catalog/cache-tags'
 import { optimizeProductImage } from '@/lib/catalog/optimize-image'
 import type { ActionResult } from '@/lib/catalog/types'
 import {
@@ -56,11 +60,14 @@ function extensionFor(type: string): string {
 function revalidateSitePage(pageKey: SitePageKey) {
   revalidateTag(SITE_PAGES_TAG)
   revalidateTag(sitePageCacheTag(pageKey))
+  // Drop tagged Data Cache files so regenerated HTML cannot rebuild from stale disk.
+  purgeFetchCacheByTags([SITE_PAGES_TAG, sitePageCacheTag(pageKey)])
   revalidatePath('/admin/website')
   revalidatePath(`/admin/website/${pageKey === 'site' ? 'site' : pageKey}`)
   if (pageKey === 'home') {
     revalidatePath('/', 'layout')
-    purgePrerenderArtifacts(['index'])
+    // Home shares the store layout (nav/logo); wipe the whole surface.
+    purgeStorefrontPrerender()
   }
   if (pageKey === 'about') {
     revalidatePath('/about', 'page')
@@ -73,13 +80,14 @@ function revalidateSitePage(pageKey: SitePageKey) {
     revalidatePath('/privacy')
     revalidatePath('/admin/website/popup')
     revalidateTag(CAMPAIGNS_ANNOUNCEMENT_TAG)
-    purgePrerenderArtifacts(['index', 'about', 'terms', 'privacy'])
+    purgeStorefrontPrerender()
   }
   if (pageKey === 'navigation') {
+    // Nav + logo live in the store layout — every storefront page embeds them.
     revalidatePath('/', 'layout')
     revalidatePath('/shop')
     revalidatePath('/admin/website/navigation')
-    purgePrerenderArtifacts(['index', 'shop'])
+    purgeStorefrontPrerender()
   }
 }
 
@@ -185,6 +193,9 @@ export async function saveNavigationContent(
 /**
  * Upload an image or video for Website Modifier. Returns a storage path
  * (not a full URL) suitable for storing in site_pages content.
+ *
+ * Pass `trim: "1"` in the form to crop empty edge padding (logos/marks).
+ * Off by default so lifestyle photos keep their framing.
  */
 export async function uploadSiteMedia(
   pageKey: string,
@@ -200,6 +211,7 @@ export async function uploadSiteMedia(
   if (!(file instanceof File) || file.size === 0) {
     return { ok: false, error: 'Choose a file to upload.' }
   }
+  const shouldTrim = formData.get('trim') === '1'
 
   const isVideo = file.type.startsWith('video/')
   const mediaType = isVideo ? 'video' : 'image'
@@ -229,7 +241,9 @@ export async function uploadSiteMedia(
 
   if (!isVideo && file.type !== 'image/gif') {
     try {
-      const optimized = await optimizeProductImage(bytes, file.type)
+      const optimized = await optimizeProductImage(bytes, file.type, {
+        trim: shouldTrim,
+      })
       if (optimized) {
         bytes = Buffer.from(optimized.buffer)
         contentType = optimized.contentType

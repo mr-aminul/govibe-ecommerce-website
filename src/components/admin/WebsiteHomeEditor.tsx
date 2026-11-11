@@ -732,6 +732,8 @@ export function WebsiteHomeEditor({
                     onChange={(path) => setHero({ logoSrc: path })}
                     label="Replace logo"
                     aspectClassName="aspect-[4/1]"
+                    objectFit="contain"
+                    trimEmptyEdges
                     fallback="/logo.png"
                   />
                 </div>

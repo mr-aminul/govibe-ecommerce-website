@@ -473,9 +473,13 @@ comment on function public.admin_logistics_analytics() is
 
 revoke all on function public.admin_sales_analytics(timestamptz, timestamptz) from public;
 revoke all on function public.admin_logistics_analytics() from public;
--- PostgREST DB role (often named service_role on migrated hosts)
+-- PostgREST DB roles (govibe_app for GoVibe; service_role / viable_app on shared hosts)
 do $$
 begin
+  if exists (select 1 from pg_roles where rolname = 'govibe_app') then
+    grant execute on function public.admin_sales_analytics(timestamptz, timestamptz) to govibe_app;
+    grant execute on function public.admin_logistics_analytics() to govibe_app;
+  end if;
   if exists (select 1 from pg_roles where rolname = 'service_role') then
     grant execute on function public.admin_sales_analytics(timestamptz, timestamptz) to service_role;
     grant execute on function public.admin_logistics_analytics() to service_role;
@@ -490,6 +494,9 @@ end $$;
 revoke all on function public.record_site_visit(text) from public;
 do $$
 begin
+  if exists (select 1 from pg_roles where rolname = 'govibe_app') then
+    grant execute on function public.record_site_visit(text) to govibe_app;
+  end if;
   if exists (select 1 from pg_roles where rolname = 'service_role') then
     grant execute on function public.record_site_visit(text) to service_role;
   end if;

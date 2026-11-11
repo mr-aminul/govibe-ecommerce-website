@@ -4,7 +4,7 @@ import { revalidatePath, revalidateTag } from 'next/cache'
 import { requireRole } from '@/lib/auth/session'
 import { CAMPAIGNS_ANNOUNCEMENT_TAG } from '@/lib/campaigns/queries'
 import type { CampaignRuleType, CampaignRules } from '@/lib/campaigns/rules'
-import { purgePrerenderArtifacts } from '@/lib/catalog/cache-tags'
+import { purgeStorefrontPrerender } from '@/lib/catalog/cache-tags'
 import { offerDeliveryPath, OFFERS_PATH } from '@/lib/offers/paths'
 import type { ActionResult } from '@/lib/catalog/types'
 import type { Json } from '@/lib/db/database.types'
@@ -76,8 +76,8 @@ function revalidateCampaigns(id?: string) {
   revalidatePath(OFFERS_PATH)
   if (id) revalidatePath(offerDeliveryPath(id))
   revalidatePath('/', 'layout')
-  // Announcement bar lives in the root layout — drop sticky homepage HTML too.
-  purgePrerenderArtifacts(['index'])
+  // Announcement bar lives in the store layout — every storefront page embeds it.
+  purgeStorefrontPrerender()
 }
 
 export async function createCampaign(

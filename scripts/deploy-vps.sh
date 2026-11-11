@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy GoVibe storefront on the VPS (run on the server as root).
-# Public site target: https://govibe.inventivelab.bd (Caddy separate).
+# Public site target: https://govibe.com.bd (Caddy separate).
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/var/www/govibe}"
@@ -19,6 +19,9 @@ if [[ "${GOVIBE_DEPLOY_REEXEC:-}" != "1" ]]; then
 fi
 
 npm ci
+# Drop stale Full Route / data cache so storefront never serves empty defaults
+# baked from a previous failed API reachability window.
+rm -rf "${APP_DIR}/.next/cache"
 # Build may need more RAM than the running app; this only affects `npm run build`.
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
 npm run build

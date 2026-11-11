@@ -1,6 +1,7 @@
 import { unstable_cache } from 'next/cache'
 import { createServiceClient } from '@/lib/db/admin'
 import { createClient } from '@/lib/db/server'
+import { isRpcFallbackError } from '@/lib/db/postgrest'
 import type { OrderStatus, PaymentMethod } from '@/lib/db/database.types'
 import {
   rangePresetLabel,
@@ -220,31 +221,23 @@ function mapRpcPayload(
   }
 }
 
-function isMissingRpcError(error: { code?: string; message?: string } | null) {
-  if (!error) return false
-  return (
-    error.code === 'PGRST202' ||
-    error.code === '42883' ||
-    /could not find the function|function .* does not exist/i.test(
-      error.message ?? '',
-    )
-  )
-}
-
 /** Preferred path: one Postgres RPC round-trip. */
 async function fetchSalesAnalyticsViaRpc(
   days: DateRangePreset,
   range: ReturnType<typeof resolveAnalyticsRange>,
 ): Promise<SalesAnalytics | null> {
   const db = createServiceClient()
-  const { data, error } = await db.rpc('admin_sales_analytics', {
+  const { data, error, status } = await db.rpc('admin_sales_analytics', {
     p_from: range.fromIso,
     p_to: range.toIso,
   })
 
   if (error) {
-    if (isMissingRpcError(error)) return null
-    console.error('[analytics] rpc', error)
+    // Missing RPC, legacy Supabase auth gate, or gateway blips → Node fallback.
+    if (isRpcFallbackError(error, status)) return null
+    console.warn(
+      `[analytics] rpc failed (${status}): ${error.message}${error.code ? ` [${error.code}]` : ''}`,
+    )
     return null
   }
 

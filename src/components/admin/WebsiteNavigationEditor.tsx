@@ -475,6 +475,7 @@ export function WebsiteNavigationEditor({
         aspectClassName="aspect-[3/1]"
         fallback="/logo-dark.png"
         objectFit="contain"
+        trimEmptyEdges
         className="rounded-md"
       />
     </div>

@@ -24,6 +24,11 @@ type EncodedWebp = {
 export type OptimizeImageOptions = {
   /** Center-crop to a 1:1 square (product gallery / cards). */
   square?: boolean
+  /**
+   * Crop transparent / uniform edge padding (logos, marks).
+   * Keeps the visible artwork filling the frame.
+   */
+  trim?: boolean
 }
 
 async function encodeWebp(
@@ -32,7 +37,21 @@ async function encodeWebp(
   options: OptimizeImageOptions = {},
 ): Promise<EncodedWebp> {
   const square = options.square === true
-  const result = await sharp(bytes, { failOn: 'none' })
+  let source = bytes
+  if (options.trim) {
+    try {
+      // Threshold softens anti-aliased edges so trim doesn't leave a halo.
+      // Sharp throws when the whole frame is one color — keep untrimmed then.
+      source = await sharp(bytes, { failOn: 'none' })
+        .rotate()
+        .trim({ threshold: 16 })
+        .toBuffer()
+    } catch {
+      source = bytes
+    }
+  }
+
+  const result = await sharp(source, { failOn: 'none' })
     .rotate()
     .resize({
       width: IMAGE_OPTIMIZE_MAX_EDGE,

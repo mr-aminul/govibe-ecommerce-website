@@ -19,6 +19,8 @@ type SiteMediaPickerProps = {
   className?: string
   /** Image/video fit inside the frame. Logos usually want `contain`. */
   objectFit?: 'cover' | 'contain'
+  /** Crop empty edge padding on upload (logos/marks). */
+  trimEmptyEdges?: boolean
 }
 
 /**
@@ -35,6 +37,7 @@ export function SiteMediaPicker({
   fallback = '/images/hero.png',
   className = '',
   objectFit = 'cover',
+  trimEmptyEdges = false,
 }: SiteMediaPickerProps) {
   const fitClass =
     objectFit === 'contain' ? 'object-contain' : 'object-cover'
@@ -63,6 +66,7 @@ export function SiteMediaPicker({
         const prepared = await prepareMediaFileForUpload(file)
         const formData = new FormData()
         formData.set('file', prepared.file)
+        if (trimEmptyEdges) formData.set('trim', '1')
         const result = await uploadSiteMedia(pageKey, formData)
         if (!result.ok) {
           setError(result.error)

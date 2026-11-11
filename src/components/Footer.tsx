@@ -19,7 +19,7 @@ function InstagramIcon({ className = 'h-4 w-4' }: { className?: string }) {
   )
 }
 
-export function Footer() {
+export function Footer({ logoSrc }: { logoSrc?: string | null }) {
   const { brand, footer } = useSiteSettings()
   const year = new Date().getFullYear()
   const copyright = footer.copyright.replaceAll('{year}', String(year))
@@ -28,7 +28,7 @@ export function Footer() {
     <footer className="mt-auto bg-navy-deep text-white">
       {/* Mobile — centered compact layout */}
       <div className="flex flex-col items-center px-5 py-10 text-center md:hidden">
-        <BrandLogo variant="light" heightClassName="h-9" />
+        <BrandLogo variant="light" heightClassName="h-9" src={logoSrc} />
 
         <div className="mt-6 flex items-center gap-3">
           <a
@@ -107,7 +107,7 @@ export function Footer() {
       {/* Desktop — multi-column layout */}
       <div className="mx-auto hidden max-w-7xl gap-10 px-4 py-14 md:grid md:grid-cols-2 md:px-6 lg:grid-cols-12 lg:gap-8 lg:px-8 lg:py-16">
         <div className="lg:col-span-4">
-          <BrandLogo variant="light" heightClassName="h-10" />
+          <BrandLogo variant="light" heightClassName="h-10" src={logoSrc} />
           <p className="mt-4 max-w-sm text-[14px] leading-relaxed text-white/70">
             {footer.blurb}
           </p>

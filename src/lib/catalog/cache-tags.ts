@@ -1,4 +1,4 @@
-import { unlinkSync } from 'node:fs'
+import { readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { revalidatePath, revalidateTag } from 'next/cache'
 
@@ -16,6 +16,19 @@ export function storeProductTag(slug: string): string {
  */
 export const STORE_CACHE_REVALIDATE = false as const
 
+/** Storefront routes that embed header/nav (layout) data in prerendered HTML. */
+const STOREFRONT_PRERENDER_STEMS = [
+  'index',
+  'shop',
+  'about',
+  'cart',
+  'checkout',
+  'orders',
+  'wishlist',
+  'terms',
+  'privacy',
+] as const
+
 /**
  * Self-hosted Next can keep Full Route Cache HTML on disk under
  * `.next/server/app/` even after `revalidatePath`. Delete those artifacts so
@@ -30,6 +43,56 @@ export function purgePrerenderArtifacts(routeStems: string[]) {
       } catch {
         // Missing file is fine — route may not have been prerendered yet.
       }
+    }
+  }
+}
+
+/**
+ * Wipe every storefront Full Route Cache artifact that carries shared layout
+ * data (logo, nav, announcement). Also drops product PDPs' HTML when present.
+ */
+export function purgeStorefrontPrerender() {
+  purgePrerenderArtifacts([...STOREFRONT_PRERENDER_STEMS])
+
+  const productDir = path.join(process.cwd(), '.next', 'server', 'app', 'product')
+  try {
+    for (const slug of readdirSync(productDir, { withFileTypes: true })) {
+      if (!slug.isDirectory()) continue
+      purgePrerenderArtifacts([path.join('product', slug.name)])
+    }
+  } catch {
+    // product/ may not exist yet
+  }
+}
+
+/**
+ * Delete on-disk `unstable_cache` / fetch-cache entries that carry any of the
+ * given tags. Needed on self-hosted Next when tag revalidation leaves stale
+ * disk entries that Full Route Cache regenerates from.
+ */
+export function purgeFetchCacheByTags(tags: string[]) {
+  if (tags.length === 0) return
+  const wanted = new Set(tags)
+  const dir = path.join(process.cwd(), '.next', 'cache', 'fetch-cache')
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return
+  }
+
+  for (const name of names) {
+    const file = path.join(dir, name)
+    try {
+      const raw = readFileSync(file, 'utf8')
+      const entry = JSON.parse(raw) as { tags?: unknown }
+      if (!Array.isArray(entry.tags)) continue
+      if (!entry.tags.some((tag) => typeof tag === 'string' && wanted.has(tag))) {
+        continue
+      }
+      unlinkSync(file)
+    } catch {
+      // Corrupt / raced — ignore
     }
   }
 }
@@ -60,4 +123,5 @@ export function revalidateStorefront(
     'shop',
     ...unique.map((slug) => path.join('product', slug)),
   ])
+  purgeFetchCacheByTags([STORE_CATALOG_TAG])
 }

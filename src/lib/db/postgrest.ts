@@ -5,13 +5,40 @@
 
 import { govibeFetch } from '@/lib/db/tls-fetch'
 
-export type DbError = { message: string; code?: string; details?: string }
+export type DbError = {
+  message: string
+  code?: string
+  details?: string
+  hint?: string
+}
 export type DbResult<T> = {
   data: T
   error: DbError | null
   count: number | null
   status: number
   statusText: string
+}
+
+/** Soft-fail RPC errors where Node legacy aggregation should run instead. */
+export function isRpcFallbackError(
+  error: DbError | null,
+  status?: number,
+): boolean {
+  if (!error) return false
+  if (status === 502 || status === 503 || status === 504) return true
+  if (
+    error.code === 'PGRST202' ||
+    error.code === '42883' ||
+    error.code === 'P0001'
+  ) {
+    if (error.code === 'P0001') {
+      return /not authorized/i.test(error.message ?? '')
+    }
+    return true
+  }
+  return /could not find the function|function .* does not exist|not authorized|bad gateway|service unavailable|gateway timeout/i.test(
+    error.message ?? '',
+  )
 }
 
 type Filter = { type: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'like' | 'ilike' | 'is' | 'in' | 'contains'; column: string; value: unknown }
@@ -491,10 +518,25 @@ export function createDbClient(auth: AuthApi): GoVibeDbClient {
           }
         }
         if (!res.ok) {
-          const errObj = parsed as { message?: string }
+          const errObj = parsed as {
+            message?: string
+            code?: string
+            details?: string
+            hint?: string
+          }
+          const message =
+            errObj?.message ||
+            (typeof parsed === 'string' ? parsed : '') ||
+            res.statusText ||
+            `HTTP ${res.status}`
           return {
             data: null as T,
-            error: { message: errObj?.message || res.statusText },
+            error: {
+              message,
+              code: errObj?.code,
+              details: errObj?.details,
+              hint: errObj?.hint,
+            },
             count: null,
             status: res.status,
             statusText: res.statusText,
